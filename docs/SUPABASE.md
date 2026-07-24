@@ -1,6 +1,12 @@
 # Configuración de Supabase
 
-No se ha creado ni modificado ningún proyecto Supabase. Este documento es el punto de entrega para conectarlo cuando el propietario defina la cuenta.
+El entorno local está conectado al proyecto indicado por el propietario. No se
+creó otro proyecto ni se guardó la clave `service_role`; las migraciones se
+ejecutan manualmente y permanecen versionadas en este repositorio.
+
+La clave `service_role` fue compartida durante la configuración. Debe rotarse
+antes de producción y solo volver a crearse como secreto de servidor si un
+proceso administrativo demuestra que la necesita.
 
 ## Decisiones de infraestructura
 
@@ -49,6 +55,8 @@ Ejecutar en orden:
 
 1. `202607240001_initial_lims.sql`: entidades, índices, auditoría, RLS, Storage y ciclo de validación.
 2. `202607240002_clinical_rpcs.sql`: pacientes, órdenes, captura tipada, emisión, importación, analítica y evolución.
+3. `202607240003_extension_schema_compatibility.sql`: compatibilidad explícita
+   con el esquema `extensions` usado por Supabase.
 
 Las RPC disponibles son `search_patients`, `upsert_patient`, `create_order`,
 `save_result_draft`, `submit_for_validation`, `validate_results`,

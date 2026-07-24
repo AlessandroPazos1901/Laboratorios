@@ -4,7 +4,9 @@ Aplicación interna para gestionar pacientes, órdenes, resultados, validaciones
 
 ## Estado
 
-La interfaz funciona localmente con datos ficticios. Supabase no está conectado ni creado: el esquema, las políticas y el procedimiento de alta están listos para aplicarse cuando el propietario indique la cuenta y el proyecto.
+La interfaz y el proyecto Supabase indicado por el propietario ya están conectados
+en el entorno local. El acceso de demostración quedó desactivado. Las migraciones
+se aplican manualmente y deben verificarse antes de cargar datos clínicos.
 
 ## Desarrollo local
 

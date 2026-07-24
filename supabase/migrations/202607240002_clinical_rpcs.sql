@@ -262,7 +262,10 @@ returns table(
 ) language sql stable security definer set search_path = public as $$
   select o.ordered_at,rv.numeric_value,rv.clinical_snapshot->>'unit',rv.clinical_snapshot->>'method',
          rv.flag,rp.version,
-         encode(digest(coalesce(rv.clinical_snapshot->>'unit','') || '|' || coalesce(rv.clinical_snapshot->>'method',''),'sha256'),'hex')
+         encode(extensions.digest(
+           coalesce(rv.clinical_snapshot->>'unit','') || '|' || coalesce(rv.clinical_snapshot->>'method',''),
+           'sha256'
+         ),'hex')
   from public.orders o
   join public.result_revisions rr on rr.order_id=o.id and rr.status in ('validated','delivered')
   join public.result_values rv on rv.revision_id=rr.id

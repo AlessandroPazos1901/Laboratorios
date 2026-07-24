@@ -300,8 +300,8 @@ language sql stable security definer set search_path = public as $$
     and p.archived_at is null
     and (
       p.document_number ilike '%' || trim(search_text) || '%'
-      or unaccent(concat_ws(' ', p.first_names, p.paternal_surname, p.maternal_surname))
-         ilike '%' || unaccent(trim(search_text)) || '%'
+      or extensions.unaccent(concat_ws(' ', p.first_names, p.paternal_surname, p.maternal_surname))
+         ilike '%' || extensions.unaccent(trim(search_text)) || '%'
     )
   order by (p.document_number = trim(search_text)) desc, p.paternal_surname
   limit least(greatest(result_limit, 1), 50);
