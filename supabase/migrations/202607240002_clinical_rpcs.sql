@@ -50,7 +50,7 @@ begin
   if coalesce(array_length(selected_analysis_versions,1),0)=0 then raise exception 'analyses_required'; end if;
   if not exists(select 1 from public.patients where id=target_patient and archived_at is null) then raise exception 'patient_not_found'; end if;
 
-  select count(distinct value) into selected_count from unnest(selected_analysis_versions) value;
+  select count(distinct version_id) into selected_count from unnest(selected_analysis_versions) selected(version_id);
   if selected_count <> array_length(selected_analysis_versions,1) then raise exception 'duplicate_analysis_version'; end if;
 
   insert into public.orders(patient_id,priority,created_by,updated_by)
@@ -104,13 +104,19 @@ begin
   select value into selected_range
   from jsonb_array_elements(ctx.reference_ranges) value
   where (not (value ? 'sex') or value->>'sex' in (ctx.sex,'ALL'))
-    and (not (value ? 'min_age_days') or age_days is null or age_days >= (value->>'min_age_days')::integer)
-    and (not (value ? 'max_age_days') or age_days is null or age_days <= (value->>'max_age_days')::integer)
+    and (
+      (age_days is null and not (value ? 'min_age_days') and not (value ? 'max_age_days'))
+      or
+      (age_days is not null
+        and (not (value ? 'min_age_days') or age_days >= (value->>'min_age_days')::integer)
+        and (not (value ? 'max_age_days') or age_days <= (value->>'max_age_days')::integer))
+    )
   order by coalesce((value->>'min_age_days')::integer,0) desc
   limit 1;
 
   if ctx.result_type='numeric' then
-    if not (result_payload ? 'numeric_value') or num_nonnulls(result_payload->'text_value',result_payload->'qualitative_value')>0
+    if not (result_payload ? 'numeric_value')
+       or num_nonnulls(nullif(result_payload->>'text_value',''),nullif(result_payload->>'qualitative_value',''))>0
     then raise exception 'numeric_value_required'; end if;
     numeric_result := (result_payload->>'numeric_value')::numeric;
     if ctx.decimals is not null and scale(numeric_result)>ctx.decimals then raise exception 'numeric_precision_exceeded'; end if;
@@ -194,7 +200,7 @@ returns jsonb language sql stable security definer set search_path = public as $
     'sample_errors',coalesce(jsonb_agg(r.errors) filter(where r.status='invalid'),'[]'::jsonb)
   ) else null end
   from public.import_batches b left join public.import_rows r on r.batch_id=b.id
-  where b.id=target_batch group by b.id;
+  where public.current_profile_is_active() and b.id=target_batch group by b.id;
 $$;
 
 create function public.commit_patient_import(target_batch uuid)
