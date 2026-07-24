@@ -8,6 +8,10 @@ La interfaz y el proyecto Supabase indicado por el propietario ya están conecta
 en el entorno local. El acceso de demostración quedó desactivado. Las migraciones
 se aplican manualmente y deben verificarse antes de cargar datos clínicos.
 
+Con `NEXT_PUBLIC_DEMO_MODE=false`, `/app` lee exclusivamente las tablas reales.
+Una base vacía muestra métricas en cero y estados vacíos. Los datos ficticios solo
+se cargan cuando el modo de demostración se activa explícitamente.
+
 ## Desarrollo local
 
 Requiere Node.js 20 o superior.

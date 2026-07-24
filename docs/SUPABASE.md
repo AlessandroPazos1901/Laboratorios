@@ -57,6 +57,8 @@ Ejecutar en orden:
 2. `202607240002_clinical_rpcs.sql`: pacientes, órdenes, captura tipada, emisión, importación, analítica y evolución.
 3. `202607240003_extension_schema_compatibility.sql`: compatibilidad explícita
    con el esquema `extensions` usado por Supabase.
+4. `202607240004_auth_profile_bootstrap.sql`: sincroniza `auth.users` con
+   `public.profiles`, asigna el primer propietario y crea `lab_settings`.
 
 Las RPC disponibles son `search_patients`, `upsert_patient`, `create_order`,
 `save_result_draft`, `submit_for_validation`, `validate_results`,

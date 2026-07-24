@@ -12,8 +12,27 @@ export type Patient = {
   documentNumber: string;
   fullName: string;
   birthDate: string;
-  sex: "F" | "M";
+  sex: "F" | "M" | "X" | "U";
   phone?: string;
+};
+
+export type AnalyticsSummary = {
+  orders: number;
+  analyses: number;
+  patients: number;
+  delivered: number;
+  pendingValidation: number;
+  criticalValues: number;
+  medianTurnaroundMinutes: number | null;
+};
+
+export type LabData = {
+  patients: Patient[];
+  orders: LabOrder[];
+  analyses: AnalysisDefinition[];
+  auditEvents: AuditEvent[];
+  trend: { date: string; value: number }[];
+  summary: AnalyticsSummary;
 };
 
 export type ResultValue = {

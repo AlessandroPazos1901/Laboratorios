@@ -7,9 +7,11 @@ import {
   Settings, ShieldCheck, TestTube2, Users, X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { analyses, auditEvents, orders as initialOrders, patients, trend } from "@/lib/demo-data";
+import { useRouter } from "next/navigation";
+import { analyses as demoAnalyses, auditEvents as demoAuditEvents, orders as demoOrders, patients as demoPatients, trend as demoTrend } from "@/lib/demo-data";
 import { calculateAgeAt, flagNumericResult, formatStatus } from "@/lib/clinical";
-import type { LabOrder, OrderStatus, ResultValue } from "@/lib/types";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import type { LabData, LabOrder, OrderStatus, ResultValue } from "@/lib/types";
 
 type View = "inicio" | "trabajo" | "pacientes" | "analitica" | "catalogo" | "importaciones" | "auditoria" | "configuracion";
 const nav: { id: View; label: string; icon: typeof Activity }[] = [
@@ -26,11 +28,25 @@ const nav: { id: View; label: string; icon: typeof Activity }[] = [
 const statusOrder: OrderStatus[] = ["draft", "pending_validation", "validated", "delivered"];
 const fmtDate = (date: string) => new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short" }).format(new Date(date));
 
-export function LabApp() {
+export function LabApp({ data, currentUser }: { data?: LabData; currentUser?: { fullName: string; role: string } }) {
+  const router = useRouter();
+  const sourcePatients = data?.patients ?? demoPatients;
+  const sourceAnalyses = data?.analyses ?? demoAnalyses;
+  const sourceAuditEvents = data?.auditEvents ?? demoAuditEvents;
+  const sourceTrend = data?.trend ?? demoTrend;
+  const sourceSummary = data?.summary ?? {
+    orders: demoOrders.length,
+    analyses: demoOrders.reduce((sum, order) => sum + order.results.length, 0),
+    patients: new Set(demoOrders.map((order) => order.patientId)).size,
+    delivered: demoOrders.filter((order) => order.status === "delivered").length,
+    pendingValidation: demoOrders.filter((order) => order.status === "pending_validation").length,
+    criticalValues: demoOrders.flatMap((order) => order.results).filter((result) => result.flag === "critical").length,
+    medianTurnaroundMinutes: 54,
+  };
   const [view, setView] = useState<View>("inicio");
-  const [orders, setOrders] = useState(initialOrders);
+  const [orders, setOrders] = useState(data?.orders ?? demoOrders);
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState(initialOrders[0].id);
+  const [selectedId, setSelectedId] = useState((data?.orders ?? demoOrders)[0]?.id ?? "");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notice, setNotice] = useState("");
 
@@ -38,10 +54,10 @@ export function LabApp() {
     const value = query.trim().toLocaleLowerCase("es");
     if (!value) return [];
     return [
-      ...patients.filter((p) => `${p.documentNumber} ${p.fullName}`.toLowerCase().includes(value)).map((p) => ({ id: p.id, title: p.fullName, meta: `DNI ${p.documentNumber}`, kind: "Paciente" })),
+      ...sourcePatients.filter((p) => `${p.documentNumber} ${p.fullName}`.toLowerCase().includes(value)).map((p) => ({ id: p.id, title: p.fullName, meta: `DNI ${p.documentNumber}`, kind: "Paciente" })),
       ...orders.filter((o) => `${o.code} ${o.documentNumber} ${o.patientName}`.toLowerCase().includes(value)).map((o) => ({ id: o.id, title: o.code, meta: `${o.patientName} · DNI ${o.documentNumber}`, kind: "Orden" })),
     ].slice(0, 6);
-  }, [query, orders]);
+  }, [query, orders, sourcePatients]);
 
   function openOrder(id: string) {
     setSelectedId(id);
@@ -51,6 +67,12 @@ export function LabApp() {
 
   function updateOrder(next: LabOrder) {
     setOrders((all) => all.map((order) => order.id === next.id ? next : order));
+  }
+
+  async function signOut() {
+    if (isSupabaseConfigured) await createClient().auth.signOut();
+    router.replace("/login");
+    router.refresh();
   }
 
   return (
@@ -69,7 +91,7 @@ export function LabApp() {
         </nav>
         <div className="sidebar-foot">
           <div className="lab-status"><span className="status-dot" /> Operación normal</div>
-          <div className="account"><span className="avatar">AA</span><span><strong>Ana Abad</strong><small>Tecnólogo médico</small></span><button className="icon-button" aria-label="Cerrar sesión"><LogOut /></button></div>
+          <div className="account"><span className="avatar">{(currentUser?.fullName ?? "Ana Abad").split(" ").slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span><span><strong>{currentUser?.fullName ?? "Ana Abad"}</strong><small>{currentUser?.role === "owner" ? "Propietario" : currentUser ? "Personal clínico" : "Tecnólogo médico"}</small></span><button className="icon-button" aria-label="Cerrar sesión" onClick={signOut}><LogOut /></button></div>
         </div>
       </aside>
       <div className="app-body">
@@ -86,14 +108,14 @@ export function LabApp() {
         </header>
         {notice && <div className="toast" role="status"><Check />{notice}<button className="icon-button" onClick={() => setNotice("")}><X /></button></div>}
         <main className="workspace">
-          {view === "inicio" && <Dashboard orders={orders} openOrder={openOrder} />}
+          {view === "inicio" && <Dashboard orders={orders} summary={sourceSummary} openOrder={openOrder} />}
           {view === "trabajo" && <WorkQueue orders={orders} selectedId={selectedId} setSelectedId={setSelectedId} updateOrder={updateOrder} notify={setNotice} />}
-          {view === "pacientes" && <PatientsView openOrder={openOrder} />}
-          {view === "analitica" && <AnalyticsView />}
-          {view === "catalogo" && <CatalogView />}
+          {view === "pacientes" && <PatientsView patients={sourcePatients} orders={orders} trend={sourceTrend} openOrder={openOrder} />}
+          {view === "analitica" && <AnalyticsView summary={sourceSummary} />}
+          {view === "catalogo" && <CatalogView analyses={sourceAnalyses} />}
           {view === "importaciones" && <ImportView />}
-          {view === "auditoria" && <AuditView />}
-          {view === "configuracion" && <SettingsView />}
+          {view === "auditoria" && <AuditView events={sourceAuditEvents} />}
+          {view === "configuracion" && <SettingsView connected={Boolean(data)} />}
         </main>
       </div>
     </div>
@@ -104,12 +126,14 @@ function PageHead({ eyebrow, title, text, action }: { eyebrow: string; title: st
   return <div className="page-head"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{text}</p></div>{action}</div>;
 }
 
-function Dashboard({ orders, openOrder }: { orders: LabOrder[]; openOrder: (id: string) => void }) {
+function Dashboard({ orders, summary, openOrder }: { orders: LabOrder[]; summary: LabData["summary"]; openOrder: (id: string) => void }) {
+  const delayed = orders.filter((order) => order.turnaroundMinutes !== undefined && order.turnaroundMinutes > 120).length;
+  const criticalOrder = orders.find((order) => order.results.some((result) => result.flag === "critical"));
   const cards = [
-    ["Órdenes hoy", "38", "+12% vs. ayer", ClipboardList],
-    ["Análisis procesados", "146", "+8% vs. ayer", FlaskConical],
-    ["Pendientes de validar", "12", "2 con prioridad", Clock3],
-    ["Tiempo de respuesta", "54 min", "−6 min vs. mes", Gauge],
+    ["Órdenes del periodo", String(summary.orders), "Datos reales", ClipboardList],
+    ["Análisis solicitados", String(summary.analyses), "Datos reales", FlaskConical],
+    ["Pendientes de validar", String(summary.pendingValidation), "Requieren revisión", Clock3],
+    ["Tiempo de respuesta", summary.medianTurnaroundMinutes === null ? "—" : `${summary.medianTurnaroundMinutes} min`, "Mediana del periodo", Gauge],
   ] as const;
   return <>
     <PageHead eyebrow="Viernes, 24 de julio" title="Buen día, Ana" text="Este es el estado operativo del laboratorio en tiempo real." action={<div className="period-control"><button className="active">Hoy</button><button>7 días</button><button>30 días</button></div>} />
@@ -117,13 +141,14 @@ function Dashboard({ orders, openOrder }: { orders: LabOrder[]; openOrder: (id: 
     <section className="dashboard-grid">
       <article className="panel chart-panel">
         <div className="panel-head"><div><h2>Actividad del laboratorio</h2><p>Órdenes recibidas y validadas por día</p></div><span className="legend"><i className="teal" />Recibidas <i className="blue" />Validadas</span></div>
-        <ActivityChart />
+        {orders.length ? <ActivityChart /> : <div className="empty small"><BarChart3 /><p>Aún no hay órdenes para graficar.</p></div>}
       </article>
       <article className="panel attention-panel">
         <div className="panel-head"><div><h2>Requieren atención</h2><p>Acciones clínicas pendientes</p></div></div>
-        <button onClick={() => openOrder(orders[0].id)} className="attention critical"><CircleAlert /><span><strong>1 valor crítico</strong><small>Glucosa · ORD-2026-04668</small></span><ChevronRight /></button>
-        <button className="attention warning"><Clock3 /><span><strong>2 órdenes demoradas</strong><small>Superaron el tiempo objetivo</small></span><ChevronRight /></button>
-        <button className="attention neutral"><BookOpenCheck /><span><strong>12 por validar</strong><small>Resultados listos para revisión</small></span><ChevronRight /></button>
+        {summary.criticalValues > 0 && criticalOrder && <button onClick={() => openOrder(criticalOrder.id)} className="attention critical"><CircleAlert /><span><strong>{summary.criticalValues} {summary.criticalValues === 1 ? "valor crítico" : "valores críticos"}</strong><small>{criticalOrder.code}</small></span><ChevronRight /></button>}
+        {delayed > 0 && <button className="attention warning"><Clock3 /><span><strong>{delayed} {delayed === 1 ? "orden demorada" : "órdenes demoradas"}</strong><small>Superaron el tiempo objetivo</small></span><ChevronRight /></button>}
+        {summary.pendingValidation > 0 && <button className="attention neutral"><BookOpenCheck /><span><strong>{summary.pendingValidation} por validar</strong><small>Resultados listos para revisión</small></span><ChevronRight /></button>}
+        {summary.criticalValues === 0 && delayed === 0 && summary.pendingValidation === 0 && <div className="empty small"><Check /><p>No hay acciones pendientes.</p></div>}
       </article>
     </section>
     <article className="panel">
@@ -141,12 +166,12 @@ function ActivityChart() {
 
 function OrderTable({ orders, onSelect }: { orders: LabOrder[]; onSelect: (id: string) => void }) {
   return <div className="table-wrap"><table><thead><tr><th>Orden</th><th>Paciente</th><th>Grupos</th><th>Ingreso</th><th>Responsable</th><th>Estado</th><th /></tr></thead>
-    <tbody>{orders.map((order) => <tr key={order.id} onClick={() => onSelect(order.id)} tabIndex={0}><td className="mono strong">{order.code}</td><td><strong>{order.patientName}</strong><small className="block mono">DNI {order.documentNumber}</small></td><td>{order.groups.join(" · ")}</td><td>{new Date(order.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</td><td>{order.responsible}</td><td><span className={`status ${order.status}`}>{formatStatus(order.status)}</span></td><td><ChevronRight /></td></tr>)}</tbody>
+    <tbody>{orders.length ? orders.map((order) => <tr key={order.id} onClick={() => onSelect(order.id)} tabIndex={0}><td className="mono strong">{order.code}</td><td><strong>{order.patientName}</strong><small className="block mono">DNI {order.documentNumber}</small></td><td>{order.groups.join(" · ") || "Sin análisis"}</td><td>{new Date(order.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</td><td>{order.responsible}</td><td><span className={`status ${order.status}`}>{formatStatus(order.status)}</span></td><td><ChevronRight /></td></tr>) : <tr><td colSpan={7}><div className="empty small"><ClipboardList /><p>No hay órdenes registradas.</p></div></td></tr>}</tbody>
   </table></div>;
 }
 
 function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify }: { orders: LabOrder[]; selectedId: string; setSelectedId: (id: string) => void; updateOrder: (o: LabOrder) => void; notify: (s: string) => void }) {
-  const selected = orders.find((o) => o.id === selectedId) ?? orders[0];
+  const selected = orders.find((o) => o.id === selectedId) ?? orders[0] ?? null;
   const [filter, setFilter] = useState("all");
   const visible = filter === "all" ? orders : orders.filter((o) => o.status === filter);
   return <>
@@ -155,9 +180,9 @@ function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify }: {
       <section className="panel order-list">
         <div className="filter-tabs"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>Todas</button>{statusOrder.map((s) => <button key={s} className={filter === s ? "active" : ""} onClick={() => setFilter(s)}>{formatStatus(s)}</button>)}</div>
         <div className="compact-search"><Search /><input placeholder="Filtrar cola…" aria-label="Filtrar cola de órdenes" /></div>
-        <div className="queue">{visible.map((o) => <button key={o.id} className={o.id === selected.id ? "queue-item selected" : "queue-item"} onClick={() => setSelectedId(o.id)}><span><strong className="mono">{o.code}</strong><b>{o.patientName}</b><small>{o.groups.join(" · ")}</small></span><span><em>{new Date(o.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</em><i className={`status-dot ${o.status}`} /></span></button>)}</div>
+        <div className="queue">{visible.map((o) => <button key={o.id} className={o.id === selected?.id ? "queue-item selected" : "queue-item"} onClick={() => setSelectedId(o.id)}><span><strong className="mono">{o.code}</strong><b>{o.patientName}</b><small>{o.groups.join(" · ")}</small></span><span><em>{new Date(o.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</em><i className={`status-dot ${o.status}`} /></span></button>)}{visible.length === 0 && <div className="empty small"><ClipboardList /><p>No hay órdenes en esta cola.</p></div>}</div>
       </section>
-      <ResultWorkspace order={selected} updateOrder={updateOrder} notify={notify} />
+      {selected ? <ResultWorkspace order={selected} updateOrder={updateOrder} notify={notify} /> : <section className="panel"><div className="empty"><Microscope /><h3>Sin órdenes registradas</h3><p>Crea la primera orden después de registrar el catálogo y un paciente.</p></div></section>}
     </div>
   </>;
 }
@@ -201,34 +226,39 @@ function ResultFlag({ flag }: { flag: ResultValue["flag"] }) {
   return <span className={`flag ${flag}`}>{flag !== "normal" && <CircleAlert />}{label}</span>;
 }
 
-function PatientsView({ openOrder }: { openOrder: (id: string) => void }) {
-  const [selected, setSelected] = useState(patients[0]);
-  const patientOrders = initialOrders.filter((o) => o.patientId === selected.id);
-  const age = calculateAgeAt(selected.birthDate, "2026-07-24");
+function PatientsView({ patients, orders, trend, openOrder }: { patients: LabData["patients"]; orders: LabOrder[]; trend: LabData["trend"]; openOrder: (id: string) => void }) {
+  const [selectedId, setSelectedId] = useState(patients[0]?.id ?? "");
+  const selected = patients.find((patient) => patient.id === selectedId) ?? patients[0] ?? null;
+  if (!selected) return <><PageHead eyebrow="Registro maestro" title="Pacientes" text="Identidad única, historial de órdenes y evolución clínica." action={<button className="button primary"><Plus />Nuevo paciente</button>} /><article className="panel"><div className="empty"><Users /><h3>No hay pacientes registrados</h3><p>Registra el primer paciente por DNI para comenzar.</p></div></article></>;
+  const patientOrders = orders.filter((o) => o.patientId === selected.id);
+  const age = selected.birthDate ? calculateAgeAt(selected.birthDate, new Date().toISOString().slice(0, 10)) : null;
   return <>
     <PageHead eyebrow="Registro maestro" title="Pacientes" text="Identidad única, historial de órdenes y evolución clínica." action={<button className="button primary"><Plus />Nuevo paciente</button>} />
     <div className="patients-layout">
-      <section className="panel patient-list"><div className="compact-search"><Search /><input placeholder="DNI o nombre…" aria-label="Buscar paciente por DNI o nombre" /></div>{patients.map((p) => <button key={p.id} className={selected.id === p.id ? "patient-row active" : "patient-row"} onClick={() => setSelected(p)}><span className="avatar patient">{p.fullName.split(" ").slice(0, 2).map((x) => x[0]).join("")}</span><span><strong>{p.fullName}</strong><small className="mono">DNI {p.documentNumber}</small></span><ChevronRight /></button>)}</section>
+      <section className="panel patient-list"><div className="compact-search"><Search /><input placeholder="DNI o nombre…" aria-label="Buscar paciente por DNI o nombre" /></div>{patients.map((p) => <button key={p.id} className={selected.id === p.id ? "patient-row active" : "patient-row"} onClick={() => setSelectedId(p.id)}><span className="avatar patient">{p.fullName.split(" ").slice(0, 2).map((x) => x[0]).join("")}</span><span><strong>{p.fullName}</strong><small className="mono">DNI {p.documentNumber}</small></span><ChevronRight /></button>)}</section>
       <section className="patient-detail">
-        <article className="panel profile-panel"><div><span className="avatar patient large">{selected.fullName.split(" ").slice(0, 2).map((x) => x[0]).join("")}</span><span><p className="eyebrow">Paciente activo</p><h2>{selected.fullName}</h2><p className="mono">DNI {selected.documentNumber}</p></span></div><button className="button secondary">Editar datos</button><dl><div><dt>Edad</dt><dd>{age.years} años</dd></div><div><dt>Sexo</dt><dd>{selected.sex === "F" ? "Femenino" : "Masculino"}</dd></div><div><dt>Nacimiento</dt><dd>{selected.birthDate}</dd></div><div><dt>Teléfono</dt><dd>{selected.phone ?? "No registrado"}</dd></div></dl></article>
-        <article className="panel"><div className="panel-head"><div><h2>Evolución de glucosa</h2><p>mg/dL · Método enzimático</p></div><span className="flag high">Alto</span></div><TrendChart /><div className="compat-note"><ShieldCheck />Serie compatible: misma unidad y método. Otros métodos se muestran por separado.</div></article>
+        <article className="panel profile-panel"><div><span className="avatar patient large">{selected.fullName.split(" ").slice(0, 2).map((x) => x[0]).join("")}</span><span><p className="eyebrow">Paciente activo</p><h2>{selected.fullName}</h2><p className="mono">DNI {selected.documentNumber}</p></span></div><button className="button secondary">Editar datos</button><dl><div><dt>Edad</dt><dd>{age ? `${age.years} años` : "No registrada"}</dd></div><div><dt>Sexo</dt><dd>{{ F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" }[selected.sex]}</dd></div><div><dt>Nacimiento</dt><dd>{selected.birthDate || "No registrado"}</dd></div><div><dt>Teléfono</dt><dd>{selected.phone ?? "No registrado"}</dd></div></dl></article>
+        <article className="panel"><div className="panel-head"><div><h2>Evolución de resultados</h2><p>Series compatibles por unidad y método</p></div></div>{trend.length ? <><TrendChart points={trend} /><div className="compat-note"><ShieldCheck />Serie compatible: misma unidad y método. Otros métodos se muestran por separado.</div></> : <div className="empty small"><BarChart3 /><p>Aún no hay resultados numéricos validados.</p></div>}</article>
         <article className="panel"><div className="panel-head"><div><h2>Historial de órdenes</h2><p>{patientOrders.length} registros encontrados</p></div></div>{patientOrders.length ? <OrderTable orders={patientOrders} onSelect={openOrder} /> : <div className="empty small"><ClipboardList /><p>Sin órdenes en el periodo actual.</p></div>}</article>
       </section>
     </div>
   </>;
 }
 
-function TrendChart() {
-  const points = trend.map((p, i) => `${40 + i * 135},${180 - ((p.value - 70) / 230) * 150}`).join(" ");
-  return <svg className="trend-chart" viewBox="0 0 620 220" role="img" aria-label="Glucosa aumentó de 92 a 286 miligramos por decilitro"><line x1="40" y1="160" x2="580" y2="160" /><line x1="40" y1="110" x2="580" y2="110" /><line x1="40" y1="60" x2="580" y2="60" /><polyline points={points} fill="none" stroke="currentColor" strokeWidth="3" />{points.split(" ").map((p, i) => { const [x, y] = p.split(","); return <circle key={i} cx={x} cy={y} r="5" />; })}<text x="40" y="208">Ene 2025</text><text x="510" y="208">Jul 2026</text><text x="7" y="164">70</text><text x="2" y="114">170</text><text x="2" y="64">270</text></svg>;
+function TrendChart({ points: values }: { points: LabData["trend"] }) {
+  const min = Math.min(...values.map((point) => point.value));
+  const max = Math.max(...values.map((point) => point.value));
+  const spread = Math.max(1, max - min);
+  const points = values.map((point, index) => `${40 + index * (540 / Math.max(1, values.length - 1))},${180 - ((point.value - min) / spread) * 140}`).join(" ");
+  return <svg className="trend-chart" viewBox="0 0 620 220" role="img" aria-label="Evolución numérica del paciente"><line x1="40" y1="180" x2="580" y2="180" /><line x1="40" y1="110" x2="580" y2="110" /><line x1="40" y1="40" x2="580" y2="40" /><polyline points={points} fill="none" stroke="currentColor" strokeWidth="3" />{points.split(" ").map((point, index) => { const [x, y] = point.split(","); return <circle key={index} cx={x} cy={y} r="5" />; })}<text x="40" y="208">{values[0]?.date}</text><text x="500" y="208">{values.at(-1)?.date}</text><text x="7" y="184">{min}</text><text x="2" y="44">{max}</text></svg>;
 }
 
-function AnalyticsView() {
+function AnalyticsView({ summary }: { summary: LabData["summary"] }) {
   return <>
     <PageHead eyebrow="Inteligencia operativa" title="Analítica" text="Compara volumen, oportunidad y calidad por periodo." action={<button className="button secondary"><FileDown />Exportar</button>} />
     <section className="filter-bar"><label>Desde<input type="date" defaultValue="2026-07-01" /></label><label>Hasta<input type="date" defaultValue="2026-07-24" /></label><label>Grupo<select defaultValue=""><option value="">Todos los grupos</option><option>Hematología</option><option>Bioquímica</option></select></label><label>Comparar con<select><option>Periodo anterior equivalente</option><option>Periodo personalizado</option></select></label><button className="button primary">Aplicar filtros</button></section>
-    <section className="metrics-grid analytics"><article className="metric"><span>Órdenes</span><strong>814</strong><small className="positive">+9.4%</small></article><article className="metric"><span>Análisis realizados</span><strong>3,486</strong><small className="positive">+12.1%</small></article><article className="metric"><span>Pacientes únicos</span><strong>697</strong><small className="positive">+7.8%</small></article><article className="metric"><span>Informes entregados</span><strong>768</strong><small>94.3% del total</small></article></section>
-    <section className="dashboard-grid"><article className="panel chart-panel"><div className="panel-head"><div><h2>Volumen comparado</h2><p>Órdenes por semana</p></div><span className="legend"><i className="teal" />Actual <i className="muted-line" />Anterior</span></div><ComparisonChart /></article><article className="panel"><div className="panel-head"><div><h2>Distribución por grupo</h2><p>Análisis procesados</p></div></div>{[["Hematología", 38], ["Bioquímica", 31], ["Inmunología", 14], ["Uroanálisis", 10], ["Otros", 7]].map(([x, n]) => <div className="progress-row" key={x}><span>{x}</span><i><b style={{ width: `${n}%` }} /></i><strong>{n}%</strong></div>)}</article></section>
+    <section className="metrics-grid analytics"><article className="metric"><span>Órdenes</span><strong>{summary.orders}</strong><small>Periodo seleccionado</small></article><article className="metric"><span>Análisis solicitados</span><strong>{summary.analyses}</strong><small>Periodo seleccionado</small></article><article className="metric"><span>Pacientes únicos</span><strong>{summary.patients}</strong><small>Con órdenes</small></article><article className="metric"><span>Informes entregados</span><strong>{summary.delivered}</strong><small>{summary.orders ? `${Math.round(summary.delivered / summary.orders * 100)}% del total` : "Sin órdenes"}</small></article></section>
+    {summary.orders ? <section className="dashboard-grid"><article className="panel chart-panel"><div className="panel-head"><div><h2>Volumen comparado</h2><p>Órdenes por semana</p></div><span className="legend"><i className="teal" />Actual <i className="muted-line" />Anterior</span></div><ComparisonChart /></article><article className="panel"><div className="empty small"><BarChart3 /><p>La distribución aparecerá al procesar órdenes del periodo.</p></div></article></section> : <article className="panel"><div className="empty"><BarChart3 /><h3>Sin datos para el periodo</h3><p>Registra órdenes para habilitar comparaciones y distribuciones.</p></div></article>}
   </>;
 }
 
@@ -236,10 +266,12 @@ function ComparisonChart() {
   return <svg className="comparison-chart" viewBox="0 0 680 220" role="img" aria-label="El periodo actual supera al anterior"><polyline points="20,170 120,140 220,150 320,95 420,110 520,62 640,76" className="previous" /><polyline points="20,158 120,124 220,130 320,76 420,88 520,38 640,50" className="current" /><text x="18" y="210">Sem 1</text><text x="205" y="210">Sem 2</text><text x="405" y="210">Sem 3</text><text x="600" y="210">Sem 4</text></svg>;
 }
 
-function CatalogView() {
+function CatalogView({ analyses }: { analyses: LabData["analyses"] }) {
+  const groups = new Set(analyses.map((analysis) => analysis.group));
+  const archived = analyses.filter((analysis) => !analysis.active).length;
   return <>
     <PageHead eyebrow="Gobierno clínico" title="Catálogo de análisis" text="Versiona métodos, unidades e intervalos sin alterar el historial." action={<button className="button primary"><Plus />Nuevo análisis</button>} />
-    <div className="catalog-summary"><span><FlaskConical /><strong>88</strong> análisis activos</span><span><Database /><strong>12</strong> grupos</span><span><Archive /><strong>4</strong> archivados</span></div>
+    <div className="catalog-summary"><span><FlaskConical /><strong>{analyses.length - archived}</strong> análisis activos</span><span><Database /><strong>{groups.size}</strong> grupos</span><span><Archive /><strong>{archived}</strong> archivados</span></div>
     <article className="panel"><div className="table-actions"><div className="compact-search"><Search /><input placeholder="Buscar código o análisis…" aria-label="Buscar en el catálogo" /></div><select aria-label="Filtrar catálogo por grupo"><option>Todos los grupos</option><option>Hematología</option><option>Bioquímica</option></select></div><div className="table-wrap"><table><thead><tr><th>Código</th><th>Análisis</th><th>Grupo</th><th>Tipo</th><th>Unidad</th><th>Método</th><th>Referencia</th><th>Estado</th></tr></thead><tbody>{analyses.map((a) => <tr key={a.id}><td className="mono strong">{a.code}</td><td><strong>{a.name}</strong></td><td>{a.group}</td><td>{a.resultType === "numeric" ? "Numérico" : a.resultType === "qualitative" ? "Cualitativo" : "Texto"}</td><td className="mono">{a.unit || "—"}</td><td>{a.method}</td><td className="mono">{a.reference}</td><td><span className="status validated">Activo</span></td></tr>)}</tbody></table></div></article>
   </>;
 }
@@ -267,22 +299,22 @@ function ImportView() {
   </>;
 }
 
-function AuditView() {
+function AuditView({ events }: { events: LabData["auditEvents"] }) {
   return <>
     <PageHead eyebrow="Trazabilidad" title="Auditoría" text="Registro inmutable de acciones clínicas y administrativas." action={<button className="button secondary"><FileDown />Exportar registro</button>} />
     <section className="filter-bar"><label>Acción<select><option>Todas</option><option>Resultados</option><option>Validaciones</option><option>Catálogo</option></select></label><label>Usuario<select><option>Todos</option><option>Ana Abad</option><option>José Sacramento</option></select></label><label>Desde<input type="date" defaultValue="2026-07-24" /></label><div className="compact-search"><Search /><input placeholder="Orden o entidad…" aria-label="Buscar en auditoría por orden o entidad" /></div></section>
-    <article className="panel audit-list">{auditEvents.map((event) => <div className="audit-event" key={event.id}><i><History /></i><div><div><strong>{event.action}</strong><span className="mono">{event.entity}</span></div><p>{event.summary}</p>{event.reason && <small>Motivo: {event.reason}</small>}</div><div><strong>{event.actor}</strong><small>{fmtDate(event.occurredAt)}</small></div></div>)}</article>
+    <article className="panel audit-list">{events.map((event) => <div className="audit-event" key={event.id}><i><History /></i><div><div><strong>{event.action}</strong><span className="mono">{event.entity}</span></div><p>{event.summary}</p>{event.reason && <small>Motivo: {event.reason}</small>}</div><div><strong>{event.actor}</strong><small>{fmtDate(event.occurredAt)}</small></div></div>)}{events.length === 0 && <div className="empty"><History /><h3>Sin eventos registrados</h3><p>La auditoría se completará automáticamente con las primeras operaciones.</p></div>}</article>
   </>;
 }
 
-function SettingsView() {
+function SettingsView({ connected }: { connected: boolean }) {
   return <>
     <PageHead eyebrow="Administración" title="Configuración" text="Identidad del laboratorio, usuarios y políticas operativas." />
     <div className="settings-grid">
       <article className="panel settings-card"><FlaskConical /><div><h2>Identidad del laboratorio</h2><p>Nombre legal, RUC, dirección, logotipo y responsables de firma.</p><button className="text-button">Configurar <ChevronRight /></button></div></article>
       <article className="panel settings-card"><Users /><div><h2>Usuarios y acceso</h2><p>La cuenta propietaria administra usuarios; el personal comparte facultades clínicas.</p><button className="text-button">Administrar <ChevronRight /></button></div></article>
       <article className="panel settings-card"><ShieldCheck /><div><h2>Seguridad y retención</h2><p>Sesiones, política de correcciones, respaldos y conservación de informes.</p><button className="text-button">Revisar <ChevronRight /></button></div></article>
-      <article className="panel settings-card"><Database /><div><h2>Conexión de datos</h2><p>Supabase pendiente de conectar por el propietario del proyecto.</p><span className="status pending_validation">Pendiente</span></div></article>
+      <article className="panel settings-card"><Database /><div><h2>Conexión de datos</h2><p>{connected ? "Supabase conectado con sesión y políticas RLS activas." : "Prototipo local con datos ficticios."}</p><span className={`status ${connected ? "validated" : "pending_validation"}`}>{connected ? "Conectado" : "Demostración"}</span></div></article>
     </div>
   </>;
 }
