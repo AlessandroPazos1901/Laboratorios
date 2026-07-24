@@ -67,6 +67,11 @@ label { display: grid; gap: 7px; color: #3b4b53; font-size: .86rem; font-weight:
 .password-field .icon-button { position: absolute; top: 2px; right: 2px; }
 .form-error { margin: -10px 0; padding: 10px 12px; border-left: 3px solid var(--red); color: var(--red); background: #fff1f1; }
 .login-help { margin: 2px 0 0; color: var(--muted); text-align: center; font-size: .82rem; }
+.login-recovery { margin-top: -14px; justify-self: end; font-size: .8rem; }
+.reset-shell { display: grid; min-height: 100vh; padding: 30px; place-items: center; background: var(--canvas); }
+.reset-card { padding: 34px; border: 1px solid var(--line); border-radius: 10px; background: white; box-shadow: var(--shadow); }
+.brand-mark.dark { color: var(--ink); }.brand-mark.dark svg { color: var(--teal); }
+.security-note.reset { margin: 0; justify-content: center; color: var(--muted); }
 
 /* Shell */
 .app-shell { display: grid; min-height: 100vh; grid-template-columns: 238px minmax(0, 1fr); }

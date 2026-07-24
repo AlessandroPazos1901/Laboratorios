@@ -179,11 +179,7 @@ create table public.result_values (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (revision_id, order_analysis_id),
-  check (num_nonnulls(numeric_value, text_value, qualitative_value) <= 1),
-  check (
-    flag <> 'critical' or
-    (critical_acknowledged_at is not null and critical_acknowledged_by is not null and char_length(trim(critical_communication)) >= 5)
-  )
+  check (num_nonnulls(numeric_value, text_value, qualitative_value) <= 1)
 );
 
 create table public.report_versions (
@@ -316,12 +312,16 @@ returns public.orders language plpgsql security definer set search_path = public
 declare changed public.orders;
 begin
   if not public.current_profile_is_active() then raise exception 'not_authorized'; end if;
-  if not exists (
+  if exists (
     select 1 from public.order_analyses oa
-    join public.result_revisions rr on rr.order_id = oa.order_id
-    join public.result_values rv on rv.revision_id = rr.id and rv.order_analysis_id = oa.id
-    where oa.order_id = target_order and rr.revision = (select max(revision) from public.result_revisions where order_id = target_order)
-  ) then raise exception 'results_required'; end if;
+    where oa.order_id=target_order and not exists (
+      select 1 from public.result_revisions rr
+      join public.result_values rv on rv.revision_id=rr.id and rv.order_analysis_id=oa.id
+      where rr.order_id=target_order
+        and rr.revision=(select max(revision) from public.result_revisions where order_id=target_order)
+        and num_nonnulls(rv.numeric_value,rv.text_value,rv.qualitative_value)=1
+    )
+  ) then raise exception 'all_results_required'; end if;
   update public.orders set status='pending_validation', submitted_at=now(), lock_version=lock_version+1
   where id=target_order and status='draft' and lock_version=expected_lock_version returning * into changed;
   if changed.id is null then raise exception 'invalid_state_or_concurrent_change'; end if;

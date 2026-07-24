@@ -29,6 +29,19 @@ export default function LoginPage() {
     router.refresh();
   }
 
+  async function recoverPassword() {
+    setError("");
+    if (!email) return setError("Ingresa tu correo para solicitar la recuperación.");
+    if (!isSupabaseConfigured) return setError("La recuperación estará disponible al conectar Supabase.");
+    setLoading(true);
+    const { error: recoveryError } = await createClient().auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
+    setLoading(false);
+    if (recoveryError) return setError("No se pudo enviar la recuperación. Intenta nuevamente.");
+    setError("Si el correo está registrado, recibirá instrucciones para crear una nueva contraseña.");
+  }
+
   return (
     <main className="login-shell">
       <section className="login-context" aria-label="Información del sistema">
@@ -56,6 +69,7 @@ export default function LoginPage() {
               <button type="button" className="icon-button" onClick={() => setVisible(!visible)} aria-label={visible ? "Ocultar contraseña" : "Mostrar contraseña"}>{visible ? <EyeOff /> : <Eye />}</button>
             </span>
           </label>
+          <button className="text-button login-recovery" type="button" onClick={recoverPassword}>¿Olvidaste tu contraseña?</button>
           {error && <p className="form-error" role="alert">{error}</p>}
           <button className="button primary wide" type="submit" disabled={loading}>{loading ? "Verificando…" : <>Ingresar <ArrowRight /></>}</button>
           {demoEnabled && (

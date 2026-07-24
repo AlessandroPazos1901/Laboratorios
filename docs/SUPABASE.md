@@ -43,6 +43,41 @@ values ('RAZÓN SOCIAL PENDIENTE', 'Laboratorio José', 'America/Lima');
    - `SUPABASE_SERVICE_ROLE_KEY` solo si los procesos administrativos del servidor finalmente la requieren.
 8. Ejecutar pruebas de RLS con dos usuarios antes de cargar datos reales.
 
+## Migraciones incluidas
+
+Ejecutar en orden:
+
+1. `202607240001_initial_lims.sql`: entidades, índices, auditoría, RLS, Storage y ciclo de validación.
+2. `202607240002_clinical_rpcs.sql`: pacientes, órdenes, captura tipada, emisión, importación, analítica y evolución.
+
+Las RPC disponibles son `search_patients`, `upsert_patient`, `create_order`,
+`save_result_draft`, `submit_for_validation`, `validate_results`,
+`release_report`, `amend_report`, `preview_patient_import`,
+`commit_patient_import`, `get_analytics_summary` y `get_patient_trend`.
+
+### Forma de intervalos clínicos
+
+`analysis_versions.reference_ranges` usa una lista de objetos. El responsable
+clínico debe evitar solapamientos:
+
+```json
+[
+  {
+    "sex": "F",
+    "min_age_days": 6574,
+    "max_age_days": 43830,
+    "low": 12,
+    "high": 16,
+    "label": "12.0 – 16.0"
+  }
+]
+```
+
+`critical_limits` usa `{ "low": 7, "high": 20 }`. Las opciones cualitativas
+son una lista de textos exactos. La base verifica tipo, precisión, opción,
+versión vigente, estado, usuario y concurrencia; la selección final de
+intervalos y límites debe aprobarse con casos de frontera antes de producción.
+
 ## Reglas de acceso
 
 - `owner`: administra usuarios, identidad del laboratorio y catálogo.
