@@ -59,11 +59,18 @@ Ejecutar en orden:
    con el esquema `extensions` usado por Supabase.
 4. `202607240004_auth_profile_bootstrap.sql`: sincroniza `auth.users` con
    `public.profiles`, asigna el primer propietario y crea `lab_settings`.
+5. `202607240005_simplified_lab_workflow.sql`: adapta pacientes a DNI y nombre,
+   iguala las facultades de los perfiles activos y añade el flujo
+   registrar → guardar → imprimir sin validación clínica.
 
 Las RPC disponibles son `search_patients`, `upsert_patient`, `create_order`,
 `save_result_draft`, `submit_for_validation`, `validate_results`,
 `release_report`, `amend_report`, `preview_patient_import`,
 `commit_patient_import`, `get_analytics_summary` y `get_patient_trend`.
+
+La migración 005 añade `upsert_simple_patient`, `create_simple_order`,
+`record_order_print` y `cancel_simple_order`. La interfaz nueva utiliza estas
+funciones y conserva las anteriores únicamente por compatibilidad.
 
 ### Forma de intervalos clínicos
 
@@ -90,8 +97,10 @@ intervalos y límites debe aprobarse con casos de frontera antes de producción.
 
 ## Reglas de acceso
 
-- `owner`: administra usuarios, identidad del laboratorio y catálogo.
-- `staff`: facultades operativas para pacientes, órdenes y resultados.
+- Los tres perfiles autorizados tendrán las mismas facultades dentro de la
+  aplicación. Internamente cada cuenta se marca explícitamente como `owner`
+  para reutilizar las políticas RLS restrictivas; nunca se eleva
+  automáticamente a usuarios futuros y el rol no se muestra en la interfaz.
 - Todo usuario inactivo queda fuera por RLS.
 - La auditoría es de solo lectura para la aplicación; INSERT/UPDATE/DELETE se revocan.
 - Las transiciones clínicas se ejecutan mediante RPC transaccionales.
@@ -110,8 +119,8 @@ Antes de producción, verificar que:
 
 1. anónimo no puede leer ninguna tabla ni objeto;
 2. un usuario inactivo recibe cero filas y no puede mutar;
-3. `staff` no puede gestionar perfiles ni versionar catálogo;
+3. un perfil inactivo no puede consultar ni modificar catálogo;
 4. nadie puede modificar o eliminar `audit_events`;
-5. un resultado crítico sin comunicación documentada no se valida;
+5. un resultado crítico muestra una advertencia, pero puede guardarse e imprimirse;
 6. dos actualizaciones con el mismo `lock_version` no pueden triunfar;
 7. una URL de Storage expira y no permite enumerar objetos.

@@ -3,11 +3,23 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AnalysisDefinition, AuditEvent, LabData, LabOrder, OrderStatus, Patient, ResultFlag } from "@/lib/types";
 
-type PatientRow = { id: string; document_number: string; first_names: string; paternal_surname: string; maternal_surname: string | null; birth_date: string | null; sex: Patient["sex"] | null; phone: string | null };
-type OrderRow = { id: string; order_number: number; patient_id: string; status: OrderStatus; ordered_at: string; validated_at: string | null; delivered_at: string | null; created_by: string };
+type PatientRow = { id: string; document_number: string; full_name: string; birth_date: string | null; sex: Patient["sex"] | null; phone: string | null };
+type OrderRow = { id: string; order_number: number; patient_id: string; status: OrderStatus; ordered_at: string; validated_at: string | null; delivered_at: string | null; created_by: string; lock_version: number };
 type GroupRow = { id: string; name: string };
 type AnalysisRow = { id: string; code: string; group_id: string; name: string; result_type: AnalysisDefinition["resultType"]; active: boolean };
-type VersionRow = { id: string; analysis_id: string; version: number; unit: string | null; method: string | null; reference_ranges: unknown; effective_from: string; effective_to: string | null };
+type VersionRow = {
+  id: string;
+  analysis_id: string;
+  version: number;
+  sample_type: string;
+  unit: string | null;
+  method: string | null;
+  decimals: number | null;
+  qualitative_options: unknown;
+  reference_ranges: unknown;
+  effective_from: string;
+  effective_to: string | null;
+};
 type OrderAnalysisRow = { id: string; order_id: string; analysis_id: string; analysis_version_id: string };
 type RevisionRow = { id: string; order_id: string; revision: number; status: OrderStatus };
 type ResultRow = { id: string; revision_id: string; order_analysis_id: string; numeric_value: number | null; text_value: string | null; qualitative_value: string | null; flag: ResultFlag; clinical_snapshot: Record<string, unknown> };
@@ -30,11 +42,11 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
     patientsResult, ordersResult, groupsResult, analysesResult, versionsResult,
     orderAnalysesResult, revisionsResult, resultsResult, profilesResult, auditResult,
   ] = await Promise.all([
-    supabase.from("patients").select("id,document_number,first_names,paternal_surname,maternal_surname,birth_date,sex,phone").is("archived_at", null),
-    supabase.from("orders").select("id,order_number,patient_id,status,ordered_at,validated_at,delivered_at,created_by").order("ordered_at", { ascending: false }).limit(250),
+    supabase.from("patients").select("id,document_number,full_name,birth_date,sex,phone").is("archived_at", null),
+    supabase.from("orders").select("id,order_number,patient_id,status,ordered_at,validated_at,delivered_at,created_by,lock_version").order("ordered_at", { ascending: false }).limit(250),
     supabase.from("analysis_groups").select("id,name"),
     supabase.from("analyses").select("id,code,group_id,name,result_type,active"),
-    supabase.from("analysis_versions").select("id,analysis_id,version,unit,method,reference_ranges,effective_from,effective_to").order("version", { ascending: false }),
+    supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,effective_from,effective_to").order("version", { ascending: false }),
     supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id"),
     supabase.from("result_revisions").select("id,order_id,revision,status").order("revision", { ascending: false }),
     supabase.from("result_values").select("id,revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot"),
@@ -68,7 +80,7 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
   const patients: Patient[] = patientRows.map((row) => ({
     id: row.id,
     documentNumber: row.document_number,
-    fullName: [row.first_names, row.paternal_surname, row.maternal_surname].filter(Boolean).join(" "),
+    fullName: row.full_name,
     birthDate: row.birth_date ?? "",
     sex: row.sex ?? "U",
     phone: row.phone ?? undefined,
@@ -83,30 +95,37 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
     const groups = [...new Set(selected.map((item) => groupsById.get(analysesById.get(item.analysis_id)?.group_id ?? "")).filter((name): name is string => Boolean(name)))];
     const results = selected.flatMap((item) => {
       const result = resultByOrderAnalysis.get(item.id);
-      if (!result) return [];
       const analysis = analysesById.get(item.analysis_id);
       const version = versionsById.get(item.analysis_version_id);
-      const snapshot = result.clinical_snapshot ?? {};
-      const value = result.numeric_value ?? result.qualitative_value ?? result.text_value ?? "";
+      if (!analysis || !version) return [];
+      const snapshot = result?.clinical_snapshot ?? {};
+      const value = result?.numeric_value ?? result?.qualitative_value ?? result?.text_value ?? "";
       return [{
-        id: result.id,
+        id: result?.id ?? item.id,
+        orderAnalysisId: item.id,
         analyte: String(snapshot.analysis_name ?? analysis?.name ?? "Análisis"),
         group: groupsById.get(analysis?.group_id ?? "") ?? "Sin grupo",
+        resultType: analysis.result_type,
         value: String(value),
-        numericValue: result.numeric_value ?? undefined,
+        numericValue: result?.numeric_value ?? undefined,
         unit: String(snapshot.unit ?? version?.unit ?? ""),
         reference: String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? referenceLabel(version?.reference_ranges)),
-        flag: allowedFlags.has(result.flag) ? result.flag : "normal",
+        flag: result && allowedFlags.has(result.flag) ? result.flag : "normal",
         method: String(snapshot.method ?? version?.method ?? ""),
+        qualitativeOptions: Array.isArray(version?.qualitative_options)
+          ? version.qualitative_options.filter((option): option is string => typeof option === "string")
+          : undefined,
       }];
     });
     const status = allowedStatuses.has(row.status) ? row.status : "draft";
     const turnaroundMinutes = row.validated_at ? Math.round((new Date(row.validated_at).getTime() - new Date(row.ordered_at).getTime()) / 60000) : undefined;
     return {
       id: row.id,
+      revisionId: revision?.id ?? "",
+      lockVersion: row.lock_version,
       code: `ORD-${new Date(row.ordered_at).getFullYear()}-${String(row.order_number).padStart(5, "0")}`,
       patientId: row.patient_id,
-      patientName: patient ? [patient.first_names, patient.paternal_surname, patient.maternal_surname].filter(Boolean).join(" ") : "Paciente no disponible",
+      patientName: patient?.full_name ?? "Paciente no disponible",
       documentNumber: patient?.document_number ?? "",
       createdAt: row.ordered_at,
       status,
@@ -122,9 +141,14 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
   const analyses: AnalysisDefinition[] = analysisRows.map((row) => {
     const version = latestVersions.get(row.id);
     return {
-      id: row.id, code: row.code, name: row.name, group: groupsById.get(row.group_id) ?? "Sin grupo",
+      id: row.id, versionId: version?.id ?? "", code: row.code, name: row.name, group: groupsById.get(row.group_id) ?? "Sin grupo",
       resultType: row.result_type, unit: version?.unit ?? "", method: version?.method ?? "",
       reference: referenceLabel(version?.reference_ranges), active: row.active,
+      sampleType: version?.sample_type,
+      decimals: version?.decimals ?? undefined,
+      qualitativeOptions: Array.isArray(version?.qualitative_options)
+        ? version.qualitative_options.filter((option): option is string => typeof option === "string")
+        : undefined,
     };
   });
 

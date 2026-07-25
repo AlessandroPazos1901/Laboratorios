@@ -47,9 +47,9 @@ export function formatStatus(status: string) {
   return (
     {
       draft: "Borrador",
-      pending_validation: "Por validar",
-      validated: "Validado",
-      delivered: "Entregado",
+      pending_validation: "Completo",
+      validated: "Impreso",
+      delivered: "Impreso",
       cancelled: "Anulado",
     }[status] ?? status
   );

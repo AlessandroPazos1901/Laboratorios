@@ -11,15 +11,15 @@ El responsable clínico debe aprobar por versión:
 - intervalos por edad y sexo;
 - límites críticos y procedimiento de comunicación;
 - diseño y contenido del PDF;
-- responsables de validación y política de correcciones.
+- política de correcciones e impresión.
 
 El responsable legal debe aprobar privacidad, retención, contratos de encargado y transferencias internacionales conforme a la Ley 29733 y su reglamento vigente.
 
 ## Principios implementados
 
-- Ciclo: borrador → pendiente de validación → validado → entregado.
-- Valor crítico: confirmación y comunicación obligatorias.
-- Corrección: nueva revisión, motivo obligatorio, informe previo preservado.
+- Ciclo visible: borrador → impreso; no existe aprobación clínica por roles.
+- Valor crítico: advertencia visible no bloqueante.
+- Corrección posterior a impresión: nueva revisión y motivo obligatorio.
 - Snapshot clínico: el informe histórico no cambia cuando cambia el catálogo.
 - Evolución: nunca mezcla silenciosamente unidades o métodos incompatibles.
 - Auditoría: usuario, hora de servidor, entidad, antes/después y motivo.
@@ -29,9 +29,9 @@ El responsable legal debe aprobar privacidad, retención, contratos de encargado
 
 - Límites exactos de edad, sexo, referencia y crítico.
 - Numéricos, cualitativos y texto libre.
-- Bloqueo de unidades incompatibles.
+- Conservación de unidades en el historial.
 - Concurrencia y recuperación tras interrupción.
-- Informes A4 anonimizados aprobados por sección.
+- Informes Carta anonimizados aprobados por sección.
 - Teclado, lector de pantalla, contraste y responsive.
 - Restauración real desde backup.
 

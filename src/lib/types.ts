@@ -37,8 +37,10 @@ export type LabData = {
 
 export type ResultValue = {
   id: string;
+  orderAnalysisId: string;
   analyte: string;
   group: string;
+  resultType: "numeric" | "qualitative" | "text";
   value: string;
   numericValue?: number;
   unit: string;
@@ -49,10 +51,13 @@ export type ResultValue = {
   criticalHigh?: number;
   flag: ResultFlag;
   method: string;
+  qualitativeOptions?: string[];
 };
 
 export type LabOrder = {
   id: string;
+  revisionId: string;
+  lockVersion: number;
   code: string;
   patientId: string;
   patientName: string;
@@ -77,6 +82,7 @@ export type AuditEvent = {
 
 export type AnalysisDefinition = {
   id: string;
+  versionId: string;
   code: string;
   name: string;
   group: string;
@@ -85,4 +91,7 @@ export type AnalysisDefinition = {
   method: string;
   reference: string;
   active: boolean;
+  sampleType?: string;
+  decimals?: number;
+  qualitativeOptions?: string[];
 };
