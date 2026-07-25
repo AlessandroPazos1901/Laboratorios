@@ -5,7 +5,7 @@ export type OrderStatus =
   | "delivered"
   | "cancelled";
 
-export type ResultFlag = "normal" | "low" | "high" | "critical";
+export type ResultFlag = "normal" | "low" | "high" | "critical" | "unreviewed";
 
 export type Patient = {
   id: string;

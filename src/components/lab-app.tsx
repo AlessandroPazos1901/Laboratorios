@@ -430,8 +430,8 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
 }
 
 function ResultFlag({ flag }: { flag: ResultValue["flag"] }) {
-  const label = { normal: "Normal", low: "Bajo", high: "Alto", critical: "Crítico" }[flag];
-  return <span className={`flag ${flag}`}>{flag !== "normal" && <CircleAlert />}{label}</span>;
+  const label = { normal: "Normal", low: "Bajo", high: "Alto", critical: "Crítico", unreviewed: "No evaluado" }[flag];
+  return <span className={`flag ${flag}`}>{!["normal", "unreviewed"].includes(flag) && <CircleAlert />}{label}</span>;
 }
 
 function PatientsView({ patients, orders, trend, openOrder, newRecord }: { patients: LabData["patients"]; orders: LabOrder[]; trend: LabData["trend"]; openOrder: (id: string) => void; newRecord: () => void }) {

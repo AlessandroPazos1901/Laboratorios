@@ -23,7 +23,7 @@ function resultText(row: { numeric_value: number | null; qualitative_value: stri
 }
 
 function flagLabel(flag: string) {
-  return flag === "critical" ? "CRÍTICO" : flag === "high" ? "ALTO" : flag === "low" ? "BAJO" : "";
+  return flag === "critical" ? "CRÍTICO" : flag === "high" ? "ALTO" : flag === "low" ? "BAJO" : flag === "unreviewed" ? "NO EVALUADO" : "";
 }
 
 export async function POST(request: Request, context: { params: Promise<{ orderId: string }> }) {
@@ -97,8 +97,10 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
       analysis: String(snapshot.analysis_name ?? analysis.name),
       value: String(resultText(value)),
       unit: String(snapshot.unit ?? ""),
-      reference: String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? ""),
-      flag: value.flag,
+      reference: snapshot.historical_unreviewed === true
+        ? "Histórico · no evaluado"
+        : String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? ""),
+      flag: snapshot.historical_unreviewed === true ? "unreviewed" : value.flag,
     }];
   });
 

@@ -19,15 +19,16 @@ type VersionRow = {
   reference_ranges: unknown;
   effective_from: string;
   effective_to: string | null;
+  clinical_status: "approved" | "historical_unreviewed";
 };
 type OrderAnalysisRow = { id: string; order_id: string; analysis_id: string; analysis_version_id: string };
 type RevisionRow = { id: string; order_id: string; revision: number; status: OrderStatus };
-type ResultRow = { id: string; revision_id: string; order_analysis_id: string; numeric_value: number | null; text_value: string | null; qualitative_value: string | null; flag: ResultFlag; clinical_snapshot: Record<string, unknown> };
+type ResultRow = { id: string; revision_id: string; order_analysis_id: string; numeric_value: number | null; text_value: string | null; qualitative_value: string | null; flag: Exclude<ResultFlag, "unreviewed">; clinical_snapshot: Record<string, unknown> };
 type ProfileRow = { id: string; full_name: string };
 type AuditRow = { id: number; occurred_at: string; actor_id: string | null; action: string; entity_table: string; entity_id: string; before_values: unknown; after_values: unknown; reason: string | null };
 
 const allowedStatuses = new Set<OrderStatus>(["draft", "pending_validation", "validated", "delivered", "cancelled"]);
-const allowedFlags = new Set<ResultFlag>(["normal", "low", "high", "critical"]);
+const allowedFlags = new Set<Exclude<ResultFlag, "unreviewed">>(["normal", "low", "high", "critical"]);
 
 function referenceLabel(ranges: unknown) {
   if (!Array.isArray(ranges) || ranges.length === 0) return "Por definir";
@@ -46,7 +47,7 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
     supabase.from("orders").select("id,order_number,patient_id,status,ordered_at,validated_at,delivered_at,created_by,lock_version").order("ordered_at", { ascending: false }).limit(250),
     supabase.from("analysis_groups").select("id,name"),
     supabase.from("analyses").select("id,code,group_id,name,result_type,active"),
-    supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,effective_from,effective_to").order("version", { ascending: false }),
+    supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,effective_from,effective_to,clinical_status").order("version", { ascending: false }),
     supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id"),
     supabase.from("result_revisions").select("id,order_id,revision,status").order("revision", { ascending: false }),
     supabase.from("result_values").select("id,revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot"),
@@ -99,6 +100,10 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
       const version = versionsById.get(item.analysis_version_id);
       if (!analysis || !version) return [];
       const snapshot = result?.clinical_snapshot ?? {};
+      const isHistoricalUnreviewed = snapshot.historical_unreviewed === true;
+      const resultFlag: ResultFlag = isHistoricalUnreviewed
+        ? "unreviewed"
+        : result && allowedFlags.has(result.flag) ? result.flag : "normal";
       const value = result?.numeric_value ?? result?.qualitative_value ?? result?.text_value ?? "";
       return [{
         id: result?.id ?? item.id,
@@ -109,9 +114,13 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
         value: String(value),
         numericValue: result?.numeric_value ?? undefined,
         unit: String(snapshot.unit ?? version?.unit ?? ""),
-        reference: String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? referenceLabel(version?.reference_ranges)),
-        flag: result && allowedFlags.has(result.flag) ? result.flag : "normal",
-        method: String(snapshot.method ?? version?.method ?? ""),
+        reference: isHistoricalUnreviewed
+          ? "Histórico · no evaluado"
+          : String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? referenceLabel(version?.reference_ranges)),
+        flag: resultFlag,
+        method: isHistoricalUnreviewed
+          ? "Importado del Excel"
+          : String(snapshot.method ?? version?.method ?? ""),
         qualitativeOptions: Array.isArray(version?.qualitative_options)
           ? version.qualitative_options.filter((option): option is string => typeof option === "string")
           : undefined,
@@ -137,7 +146,11 @@ export async function loadLabData(supabase: SupabaseClient): Promise<LabData> {
   });
 
   const latestVersions = new Map<string, VersionRow>();
-  versionRows.forEach((row) => { if (!latestVersions.has(row.analysis_id)) latestVersions.set(row.analysis_id, row); });
+  versionRows.forEach((row) => {
+    if (row.clinical_status === "approved" && !latestVersions.has(row.analysis_id)) {
+      latestVersions.set(row.analysis_id, row);
+    }
+  });
   const analyses: AnalysisDefinition[] = analysisRows.map((row) => {
     const version = latestVersions.get(row.id);
     return {
