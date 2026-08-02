@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
 
 # next.js
 /.next/
@@ -42,3 +44,7 @@ yarn-error.log*
 next-env.d.ts
 .gstack/
 supabase/.temp/
+
+# Serwist genera el worker compilado durante build.
+/public/sw*
+/public/swe-worker*

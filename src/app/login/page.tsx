@@ -2,11 +2,9 @@
 
 import { Activity, ArrowRight, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
@@ -24,8 +22,7 @@ export default function LoginPage() {
     const { error: authError } = await createClient().auth.signInWithPassword({ email, password });
     setLoading(false);
     if (authError) return setError("Correo o contrasena incorrectos.");
-    router.replace("/app");
-    router.refresh();
+    window.location.replace("/app");
   }
 
   async function recoverPassword() {

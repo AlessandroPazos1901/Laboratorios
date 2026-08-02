@@ -9,6 +9,8 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "npm run build && node scripts/run-e2e.mjs",
+    "offline:keys": "node scripts/generate-offline-keys.mjs",
     "db:apply-daily-orders": "node scripts/apply-daily-order-grouping.mjs"
   },
   "dependencies": {
@@ -18,6 +20,8 @@
     "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.8",
     "exceljs": "^4.4.0",
+    "idb": "^8.0.3",
+    "jose": "^6.2.7",
     "lucide-react": "^1.26.0",
     "next": "16.2.11",
     "pdf-lib": "^1.17.1",
@@ -27,11 +31,16 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@serwist/turbopack": "^9.5.12",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.28.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.11",
+    "fake-indexeddb": "^6.2.5",
+    "serwist": "^9.5.12",
     "typescript": "^5",
     "vitest": "^4.1.10"
   },

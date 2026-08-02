@@ -275,9 +275,6 @@ returns table(
   order by o.ordered_at;
 $$;
 
-create trigger import_batches_audit after insert or update or delete on public.import_batches
-for each row execute function public.capture_audit_event();
-
 grant execute on function public.upsert_patient(jsonb) to authenticated;
 grant execute on function public.create_order(uuid,uuid[],text) to authenticated;
 grant execute on function public.save_result_draft(uuid,uuid,jsonb,integer) to authenticated;

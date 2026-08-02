@@ -2,6 +2,11 @@
 
 Fecha de actualización: 24 de julio de 2026  
 Estado: alcance funcional confirmado por el cliente  
+
+> Decisión vigente (2 de agosto de 2026): los registros no tienen estado. Se
+> guardan y permanecen editables; imprimir es opcional, no cambia datos y no
+> produce métricas ni eventos de impresión. Esta decisión reemplaza cualquier
+> referencia anterior a estados o seguimiento de impresiones en este documento.
 Objetivo: reemplazar el Excel por una aplicación sencilla para registrar pacientes, análisis y resultados, imprimirlos y consultar estadísticas.
 
 ## 1. Alcance confirmado
@@ -36,7 +41,7 @@ Decisiones confirmadas:
 - un DNI repetido representa al mismo paciente con uno o más análisis, incluso el mismo día;
 - no se envían resultados a validación;
 - no hay autorizadores ni permisos diferentes entre los tres usuarios;
-- cualquier usuario autorizado puede registrar o corregir, quedando identificado en auditoría;
+- cualquier usuario autorizado puede registrar o corregir;
 - un valor crítico muestra una advertencia pequeña y visible, pero no bloquea el guardado ni la impresión;
 - la fecha y hora se completan con el momento actual y pueden editarse;
 - no se conserva un código de muestra;
@@ -52,18 +57,17 @@ Decisiones confirmadas:
 
 ## 2. Estado real de la aplicación
 
-La aplicación ya dispone de login con Supabase, base de datos, RLS, auditoría, navegación y diseño visual. No obstante, todavía mezcla pantallas reales con comportamientos de demostración.
+La aplicación ya dispone de login con Supabase, base de datos, RLS, navegación y diseño visual. No obstante, todavía mezcla pantallas reales con comportamientos de demostración.
 
 | Área | Estado actual | Trabajo pendiente |
 |---|---|---|
 | Login | Funciona | Mejorar errores, sesiones y probar tres cuentas |
 | Inicio | Parcial | Sustituir gráficas y fechas fijas por consultas reales |
-| Trabajo diario | Solo lectura/estado local | Crear registros y guardar resultados en Supabase |
+| Trabajo diario | Solo lectura local | Crear registros y guardar resultados en Supabase |
 | Pacientes | Solo lectura | Buscar, crear, editar y abrir historial |
 | Estadísticas | Maqueta | Filtros y comparaciones reales |
 | Catálogo | Solo lectura | Cargar estructura del Excel y permitir mantenimiento |
 | Importaciones | Vista previa | Importar pacientes y cargar muestra inicial |
-| Auditoría | Solo lectura básica | Filtrar, ver cambios y exportar |
 | Configuración | Maqueta | Simplificar a identidad de impresión y cuentas activas |
 | Impresión | Solo demo | Generar informe real desde Supabase |
 
@@ -114,10 +118,9 @@ Cada registro agrupa:
 - tipo y condición de muestra cuando corresponda;
 - resultados;
 - observaciones;
-- estado `borrador`, `completo`, `impreso` o `anulado`;
 - usuario creador y último editor.
 
-No habrá estado “pendiente de validación” ni acción “validar”.
+No habrá estados, validación ni acción “validar”.
 
 ### Resultados y revisiones
 
@@ -125,9 +128,10 @@ No habrá estado “pendiente de validación” ni acción “validar”.
 - unidad y rango tomados de la versión del catálogo;
 - bandera normal, baja, alta o crítica;
 - historial de modificaciones;
-- motivo de corrección cuando un resultado previamente impreso cambia.
+- edición posterior conservando el historial de modificaciones.
 
-Los informes no se almacenan. Al imprimir se genera el documento desde la revisión vigente y se registra un evento de impresión en auditoría.
+Los informes no se almacenan. Al imprimir se genera el documento desde los
+datos vigentes sin modificar el registro ni guardar un evento de impresión.
 
 ### Catálogo
 
@@ -162,7 +166,6 @@ Supabase
   - Auth
   - PostgreSQL + RLS
   - RPC transaccionales
-  - auditoría inmutable
 ```
 
 Se mantiene Next.js + Supabase sin Prisma, microservicios, Redis ni API pública.
@@ -185,12 +188,12 @@ Cambios técnicos necesarios:
 Tareas:
 
 - crear una nueva migración que haga equivalentes a todos los usuarios activos;
-- añadir o adaptar estados a `draft`, `completed`, `printed` y `cancelled`;
-- crear RPC para completar un registro sin validación;
+- retirar estados y transiciones del flujo funcional;
+- guardar cada registro directamente sin validación;
 - permitir impresión no bloqueante cuando los resultados estén completos;
-- adaptar la corrección para crear revisión y guardar motivo;
+- permitir correcciones directas con trazabilidad de cambios;
 - convertir los valores críticos en advertencia, no condición de bloqueo;
-- registrar evento de impresión sin almacenar PDF;
+- generar la impresión sin almacenar PDF ni registrar una métrica;
 - simplificar pacientes a DNI y nombre obligatorio;
 - definir índices para DNI, fecha, grupo y análisis;
 - retirar del frontend el lenguaje de validación, entrega y tiempo de respuesta.
@@ -235,7 +238,7 @@ Tareas:
 - foco y búsqueda inmediata por DNI;
 - formulario corto: DNI y nombre completo;
 - creación mediante RPC idempotente;
-- edición del nombre con auditoría;
+- edición del nombre;
 - ficha con registros cronológicos;
 - acceso directo a “Nuevo análisis” desde la ficha;
 - paginación y estados vacíos;
@@ -260,7 +263,6 @@ Tareas:
 - archivado en lugar de eliminación;
 - paneles frecuentes en primer lugar;
 - validaciones de duplicados y valores incompletos;
-- auditoría de cada cambio.
 
 Criterios de aceptación:
 
@@ -306,23 +308,18 @@ Criterios de aceptación:
 - el recorrido funciona por teclado;
 - una orden con valor crítico puede guardarse e imprimirse mostrando la advertencia.
 
-### Fase 6 — Edición e historial
+### Fase 6 — Edición
 
 Tareas:
 
-- edición directa de borradores;
-- si ya se imprimió, pedir motivo antes de cambiar resultados;
-- crear una nueva revisión sin borrar valores anteriores;
-- mostrar línea de tiempo: creación, cambios e impresiones;
-- detalle de antes/después;
-- indicar usuario y fecha en cada evento;
-- restauración no automática: para recuperar un valor anterior se registra una nueva corrección.
+- edición directa de resultados;
+- guardar directamente el valor vigente;
+- mostrar quién realizó cada análisis.
 
 Criterios de aceptación:
 
-- todo cambio puede atribuirse a un usuario;
-- el historial no puede editarse ni borrarse desde la aplicación;
-- se distinguen valor original, correcciones e impresión más reciente.
+- los resultados guardados vuelven a cargarse correctamente;
+- cualquier resultado puede corregirse y guardarse de nuevo.
 
 ### Fase 7 — Informe Carta e impresión
 
@@ -341,7 +338,6 @@ Tareas:
 - vista previa y botón Imprimir;
 - descarga PDF como facilidad secundaria;
 - no guardar el archivo ni enviarlo por ningún canal;
-- registrar en auditoría que se imprimió.
 
 Criterios de aceptación:
 
@@ -356,12 +352,11 @@ Criterios de aceptación:
 Tareas:
 
 - cola por fecha;
-- filtros: hoy, rango, DNI, nombre, grupo, análisis y estado;
-- mostrar primero registros con resultados pendientes;
+- filtros: hoy, rango, DNI, nombre, grupo y análisis;
+- ordenar los registros por fecha;
 - contadores reales;
 - acción rápida para continuar captura;
 - acción rápida para imprimir;
-- estados `borrador`, `completo`, `impreso` y `anulado`;
 - diseño denso para escritorio y tarjetas adaptadas a móvil.
 
 Criterios de aceptación:
@@ -381,7 +376,7 @@ Indicadores:
 - cantidad por análisis;
 - análisis más frecuentes;
 - resultados registrados por usuario;
-- registros impresos y pendientes.
+- tandas y resultados registrados.
 
 Filtros:
 
@@ -389,8 +384,7 @@ Filtros:
 - comparación con periodo anterior equivalente;
 - grupo;
 - análisis;
-- usuario;
-- estado.
+- usuario.
 
 Tareas:
 
@@ -414,10 +408,9 @@ Tareas:
 - selector de fechas;
 - filtros opcionales por paciente, grupo y análisis;
 - exportación tabular con una fila por resultado;
-- columnas: DNI, paciente, fecha/hora, grupo, análisis, resultado, unidad, referencia, bandera, observación, estado, creador y último editor;
+- columnas: DNI, paciente, fecha/hora, grupo, análisis, resultado, unidad, referencia, bandera, observación, creador y último editor;
 - archivo con encabezados, filtros, fechas tipadas y DNI como texto;
 - generación en servidor;
-- registro de la exportación en auditoría;
 - límites y paginación interna para volúmenes grandes.
 
 Criterios de aceptación:
@@ -427,17 +420,7 @@ Criterios de aceptación:
 - el total exportado coincide con la consulta filtrada;
 - ningún usuario no autenticado puede exportar.
 
-### Fase 11 — Auditoría y configuración
-
-Auditoría:
-
-- filtros por fecha, usuario, paciente, registro y acción;
-- cambios de paciente, catálogo y resultado;
-- eventos de impresión y exportación;
-- vista antes/después;
-- exportación del registro.
-
-Configuración:
+### Fase 11 — Configuración
 
 - nombre del laboratorio;
 - logo opcional;
@@ -458,7 +441,7 @@ Catálogo --------- tipos, unidades, rangos, archivo y versiones
 Registro ---------- creación, autosave, resultados y anulación
 Concurrencia ------ dos usuarios editando el mismo registro
 Críticos ---------- advertencia visible y no bloqueante
-Correcciones ------ motivo, revisión y auditoría
+Correcciones ------ edición y guardado directo
 Impresión --------- Carta, grupos, textos largos, sello y firma
 Estadísticas ------ reconciliación SQL y comparaciones
 Exportación ------- filtros, conteos, DNI texto y volumen
@@ -489,7 +472,7 @@ Salida:
 - pacientes y búsqueda;
 - nuevo registro;
 - captura y guardado real;
-- edición e historial;
+- edición directa;
 - impresión Carta;
 - RLS para usuarios equivalentes.
 
@@ -499,7 +482,6 @@ Salida:
 - estadísticas;
 - comparación por fechas;
 - exportación Excel;
-- auditoría filtrable;
 - configuración.
 
 ### P2 — Mejoras posteriores

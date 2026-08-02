@@ -126,11 +126,6 @@ begin
     set status = 'draft', updated_by = auth.uid(), lock_version = lock_version + 1
     where id = target_order;
 
-    insert into public.audit_events(actor_id, action, entity_table, entity_id, reason)
-    values(
-      auth.uid(), 'amend', 'orders', target_order::text,
-      'Analisis agregado a la orden diaria'
-    );
   elsif new_analysis_count > 0 and target_status = 'pending_validation' then
     update public.result_revisions
     set status = 'draft'
@@ -319,9 +314,6 @@ begin
           and num_nonnulls(rv.numeric_value, rv.text_value, rv.qualitative_value) = 1
       )
   ) then raise exception 'all_group_results_required'; end if;
-
-  insert into public.audit_events(actor_id, action, entity_table, entity_id, reason)
-  values(auth.uid(), 'print_group', 'orders', target_order::text, trim(target_group));
 
   if current_order.status in ('draft', 'pending_validation') and not exists (
     select 1

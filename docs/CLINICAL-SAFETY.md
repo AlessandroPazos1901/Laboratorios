@@ -22,7 +22,6 @@ El responsable legal debe aprobar privacidad, retención, contratos de encargado
 - Corrección posterior a impresión: nueva revisión y motivo obligatorio.
 - Snapshot clínico: el informe histórico no cambia cuando cambia el catálogo.
 - Evolución: nunca mezcla silenciosamente unidades o métodos incompatibles.
-- Auditoría: usuario, hora de servidor, entidad, antes/después y motivo.
 - Sin diagnósticos automáticos.
 
 ## Pruebas de aceptación
@@ -34,5 +33,9 @@ El responsable legal debe aprobar privacidad, retención, contratos de encargado
 - Informes Carta anonimizados aprobados por sección.
 - Teclado, lector de pantalla, contraste y responsive.
 - Restauración real desde backup.
+- Piloto offline con corte real de red, reinicio, cola idempotente y conflicto
+  concurrente entre dos equipos.
+- Aprobación escrita del almacenamiento cifrado local, vigencia de 72 horas y
+  procedimiento para equipos perdidos o revocados.
 
 Referencias de diseño del proceso: NTS 072-MINSA/DGSP-V.01 y NTP-ISO 15189:2023. La interpretación aplicable debe validarse con los responsables clínico y legal.

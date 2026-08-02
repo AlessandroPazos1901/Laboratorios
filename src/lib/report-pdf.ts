@@ -21,6 +21,7 @@ export type LabReportResult = {
 
 export type LabReportData = {
   orderNumber: number;
+  orderCode?: string;
   orderedAt: string;
   patientName: string;
   documentNumber: string;
@@ -83,7 +84,7 @@ function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, b
   drawRoundedBorder(page, MARGIN, top - height, CONTENT_WIDTH, height, 10);
 
   const rows = [
-    ["ORDEN", `ECOLAB-${data.orderNumber}`, "FECHA", new Date(data.orderedAt).toLocaleDateString("es-PE")],
+    ["ORDEN", data.orderCode ?? `ECOLAB-${data.orderNumber}`, "FECHA", new Date(data.orderedAt).toLocaleDateString("es-PE")],
     ["PACIENTE", data.patientName, "SEXO", data.sex],
     ["DNI", data.documentNumber, "EDAD", data.age],
   ];

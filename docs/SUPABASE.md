@@ -26,7 +26,7 @@ proceso administrativo demuestra que la necesita.
    - exigir correo confirmado;
    - definir una política de contraseña apropiada;
    - reducir la duración de sesión según la política del laboratorio;
-   - configurar la URL exacta de producción y las URLs de preview autorizadas.
+   - configurar la URL exacta de producción y autorizar `/reset-password` como destino de redirección para invitaciones.
 4. Crear el primer usuario desde el panel administrativo.
 5. Insertar su perfil como `owner`, sustituyendo el UUID:
 
@@ -46,14 +46,17 @@ values ('RAZÓN SOCIAL PENDIENTE', 'Laboratorio José', 'America/Lima');
    - `NEXT_PUBLIC_DEMO_MODE=false`
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `SUPABASE_SERVICE_ROLE_KEY` solo si los procesos administrativos del servidor finalmente la requieren.
+   - `NEXT_PUBLIC_SITE_URL` con el origen público de la aplicación.
+   - `SUPABASE_SECRET_KEY` para enviar invitaciones desde el servidor; se admite `SUPABASE_SERVICE_ROLE_KEY` como compatibilidad heredada.
+
+La pantalla Configuración permite que una cuenta `owner` invite nuevos usuarios. La ruta de servidor valida al remitente, envía el correo mediante Supabase Auth y activa el perfil asociado. Las claves administrativas nunca se envían al navegador.
 8. Ejecutar pruebas de RLS con dos usuarios antes de cargar datos reales.
 
 ## Migraciones incluidas
 
 Ejecutar en orden:
 
-1. `202607240001_initial_lims.sql`: entidades, índices, auditoría, RLS, Storage y ciclo de validación.
+1. `202607240001_initial_lims.sql`: entidades, índices, RLS, Storage y ciclo de validación heredado.
 2. `202607240002_clinical_rpcs.sql`: pacientes, órdenes, captura tipada, emisión, importación, analítica y evolución.
 3. `202607240003_extension_schema_compatibility.sql`: compatibilidad explícita
    con el esquema `extensions` usado por Supabase.
@@ -62,15 +65,22 @@ Ejecutar en orden:
 5. `202607240005_simplified_lab_workflow.sql`: adapta pacientes a DNI y nombre,
    iguala las facultades de los perfiles activos y añade el flujo
    registrar → guardar → imprimir sin validación clínica.
+6. `202608020001_stateless_records.sql`: retira las transiciones y RPC de
+   impresión, y elimina `audit_events` con todos sus triggers. Imprimir vuelve
+   a ser una lectura pura, sin evento ni métrica.
+7. `202608020002_offline_first_sync.sql`: registra equipos offline, agrega
+   versión de concurrencia a pacientes, recibos idempotentes, cursor de cambios
+   y la RPC transaccional `apply_offline_operation`.
 
-Las RPC disponibles son `search_patients`, `upsert_patient`, `create_order`,
-`save_result_draft`, `submit_for_validation`, `validate_results`,
-`release_report`, `amend_report`, `preview_patient_import`,
+Las RPC disponibles incluyen `search_patients`, `upsert_patient`, `create_order`,
+`save_result_draft`, `save_result_batch`, `register_daily_analyses`,
+`preview_patient_import`,
 `commit_patient_import`, `get_analytics_summary` y `get_patient_trend`.
 
-La migración 005 añade `upsert_simple_patient`, `create_simple_order`,
-`record_order_print` y `cancel_simple_order`. La interfaz nueva utiliza estas
-funciones y conserva las anteriores únicamente por compatibilidad.
+Las columnas heredadas `orders.status` y `result_revisions.status` se conservan
+temporalmente como detalle de compatibilidad y permanecen en `draft`; no se
+exponen ni representan un estado funcional. `lock_version` sí se mantiene para
+detectar ediciones concurrentes.
 
 ### Forma de intervalos clínicos
 
@@ -92,7 +102,7 @@ clínico debe evitar solapamientos:
 
 `critical_limits` usa `{ "low": 7, "high": 20 }`. Las opciones cualitativas
 son una lista de textos exactos. La base verifica tipo, precisión, opción,
-versión vigente, estado, usuario y concurrencia; la selección final de
+versión vigente, usuario y concurrencia; la selección final de
 intervalos y límites debe aprobarse con casos de frontera antes de producción.
 
 ## Reglas de acceso
@@ -102,7 +112,6 @@ intervalos y límites debe aprobarse con casos de frontera antes de producción.
   para reutilizar las políticas RLS restrictivas; nunca se eleva
   automáticamente a usuarios futuros y el rol no se muestra en la interfaz.
 - Todo usuario inactivo queda fuera por RLS.
-- La auditoría es de solo lectura para la aplicación; INSERT/UPDATE/DELETE se revocan.
 - Las transiciones clínicas se ejecutan mediante RPC transaccionales.
 - Los resultados validados no se editan: `amend_report` crea una revisión con motivo y conserva el informe anterior.
 
@@ -120,7 +129,6 @@ Antes de producción, verificar que:
 1. anónimo no puede leer ninguna tabla ni objeto;
 2. un usuario inactivo recibe cero filas y no puede mutar;
 3. un perfil inactivo no puede consultar ni modificar catálogo;
-4. nadie puede modificar o eliminar `audit_events`;
-5. un resultado crítico muestra una advertencia, pero puede guardarse e imprimirse;
-6. dos actualizaciones con el mismo `lock_version` no pueden triunfar;
-7. una URL de Storage expira y no permite enumerar objetos.
+4. un resultado crítico muestra una advertencia, pero puede guardarse e imprimirse;
+5. dos actualizaciones con el mismo `lock_version` no pueden triunfar;
+6. una URL de Storage expira y no permite enumerar objetos.

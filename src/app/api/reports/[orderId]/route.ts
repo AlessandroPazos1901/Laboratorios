@@ -20,13 +20,9 @@ function resultText(row: { numeric_value: number | null; qualitative_value: stri
 export async function POST(request: Request, context: { params: Promise<{ orderId: string }> }) {
   const { orderId } = await context.params;
   if (!UUID.test(orderId)) return NextResponse.json({ error: "Identificador inválido." }, { status: 400 });
-  const body = await request.json().catch(() => null) as { expectedLockVersion?: unknown; group?: unknown; batchId?: unknown } | null;
-  const expectedLockVersion = Number(body?.expectedLockVersion);
+  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown } | null;
   const targetGroup = typeof body?.group === "string" ? body.group.trim() : "";
   const targetBatch = typeof body?.batchId === "string" && UUID.test(body.batchId) ? body.batchId : "";
-  if (!Number.isInteger(expectedLockVersion) || expectedLockVersion < 0) {
-    return NextResponse.json({ error: "Versión de registro inválida." }, { status: 400 });
-  }
   if (body?.batchId !== undefined && !targetBatch) {
     return NextResponse.json({ error: "Tanda de análisis inválida." }, { status: 400 });
   }
@@ -37,11 +33,10 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
 
   const { data: order } = await supabase
     .from("orders")
-    .select("id,order_number,patient_id,ordered_at,status")
+    .select("id,order_number,patient_id,ordered_at")
     .eq("id", orderId)
     .maybeSingle();
   if (!order) return NextResponse.json({ error: "Registro no encontrado." }, { status: 404 });
-  if (order.status === "cancelled") return NextResponse.json({ error: "Un registro anulado no se puede imprimir." }, { status: 409 });
 
   const [
     patientResult,
@@ -131,35 +126,12 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     footer: settingsResult.data?.report_footer || "Resultados para evaluación por el profesional tratante.",
     results: printable,
   }, logoBytes);
-  const printResult = targetBatch
-    ? await supabase.rpc("record_order_batch_print", {
-        target_order: order.id,
-        target_batch: targetBatch,
-        expected_lock_version: expectedLockVersion,
-      })
-    : targetGroup
-    ? await supabase.rpc("record_order_group_print", {
-        target_order: order.id,
-        target_group: targetGroup,
-        expected_lock_version: expectedLockVersion,
-      })
-    : await supabase.rpc("record_order_print", {
-        target_order: order.id,
-        expected_lock_version: expectedLockVersion,
-      });
-  if (printResult.error) {
-    return NextResponse.json({ error: printResult.error.message }, { status: 409 });
-  }
-
-  const updatedOrder = printResult.data as { status?: string; lock_version?: number } | null;
   return new NextResponse(Buffer.from(bytes), {
     headers: {
       "Content-Type": "application/pdf",
       "Content-Disposition": `inline; filename="informe-${clean(printable[0]?.group || targetGroup || "laboratorio").replace(/[^a-zA-Z0-9-]+/g, "-").toLowerCase()}.pdf"`,
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
-      "X-Order-Status": updatedOrder?.status ?? order.status,
-      "X-Lock-Version": String(updatedOrder?.lock_version ?? expectedLockVersion),
     },
   });
 }

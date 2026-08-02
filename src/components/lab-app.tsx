@@ -3,28 +3,76 @@
 import {
   Activity, ArrowLeft, BarChart3, BookOpenCheck, CalendarDays, Check, ChevronRight, CircleAlert, Droplet,
   ClipboardList, Database, FileClock, FileDown, FlaskConical,
-  Import, LayoutDashboard, LogOut, Menu, Microscope, PanelLeftClose, Plus, Printer, Search,
-  Settings, ShieldCheck, TestTube2, Users, X,
+  Import, KeyRound, LogOut, Mail, Menu, Microscope, PanelLeftClose, Pencil, Plus, Printer, Search,
+  Send, Settings, ShieldCheck, TestTube2, Users, X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { buildPickerGroups, filterPickerAnalyses } from "@/lib/catalog-presets";
-import { flagNumericResult, formatPatientAgeAt, formatStatus, groupResultsByBatch } from "@/lib/clinical";
+import { flagNumericResult, formatPatientAgeAt, groupResultsByBatch } from "@/lib/clinical";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
-import type { LabData, LabOrder, OrderStatus, ResultValue } from "@/lib/types";
+import { useOfflineRepository } from "@/lib/offline/repository";
+import type { LabData, LabOrder, ResultValue } from "@/lib/types";
 
-type View = "inicio" | "trabajo" | "pacientes" | "analitica" | "catalogo" | "configuracion";
+type View = "trabajo" | "pacientes" | "analitica" | "catalogo" | "configuracion";
 const nav: { id: View; label: string; icon: typeof Activity }[] = [
-  { id: "inicio", label: "Inicio", icon: LayoutDashboard },
+  { id: "analitica", label: "Analítica", icon: BarChart3 },
   { id: "trabajo", label: "Trabajo diario", icon: ClipboardList },
   { id: "pacientes", label: "Pacientes", icon: Users },
-  { id: "analitica", label: "Analítica", icon: BarChart3 },
   { id: "catalogo", label: "Catálogo", icon: TestTube2 },
   { id: "configuracion", label: "Configuración", icon: Settings },
 ];
 
-const statusOrder: OrderStatus[] = ["draft", "validated"];
 const fmtDate = (date: string) => new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short" }).format(new Date(date));
+const fmtBirthDate = (date: string) => date
+  ? new Intl.DateTimeFormat("es-PE", { dateStyle: "medium" }).format(new Date(date))
+  : "No registrada";
+const sexLabel = { F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as const;
+function printPdfInBrowser(blob: Blob) {
+  return new Promise<void>((resolve, reject) => {
+    const reportUrl = URL.createObjectURL(blob);
+    const frame = document.createElement("iframe");
+    frame.className = "browser-print-frame";
+    frame.title = "Informe listo para imprimir";
+    frame.setAttribute("aria-hidden", "true");
+    let finished = false;
+    let fallback = 0;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(fallback);
+      frame.remove();
+      URL.revokeObjectURL(reportUrl);
+      resolve();
+    };
+    const fail = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(fallback);
+      frame.remove();
+      URL.revokeObjectURL(reportUrl);
+      reject(new Error("print_failed"));
+    };
+    frame.onload = () => {
+      const printWindow = frame.contentWindow;
+      if (!printWindow) return fail();
+      printWindow.addEventListener("afterprint", finish, { once: true });
+      window.setTimeout(() => {
+        try {
+          printWindow.focus();
+          printWindow.print();
+          fallback = window.setTimeout(finish, 5_000);
+        } catch {
+          fail();
+        }
+      }, 250);
+    };
+    frame.onerror = fail;
+    frame.src = reportUrl;
+    document.body.appendChild(frame);
+  });
+}
+
 const toLocalDateTimeInput = (value: string) => {
   if (!value) return "";
   const date = new Date(value);
@@ -37,32 +85,44 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
   const router = useRouter();
   const sourcePatients = data.patients;
   const sourceAnalyses = data.analyses;
-  const sourceSummary = data.summary;
-  const [view, setView] = useState<View>("inicio");
+  const [view, setView] = useState<View>("analitica");
   const sourceOrders = data.orders;
   const [orderOverrides, setOrderOverrides] = useState<Record<string, LabOrder>>({});
   const orders = sourceOrders.map((order) => orderOverrides[order.id] ?? order);
-  const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(data.orders[0]?.id ?? "");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [newRecordOpen, setNewRecordOpen] = useState(false);
   const [newRecordAt, setNewRecordAt] = useState("");
+  const [online, setOnline] = useState(true);
 
-  const matches = useMemo(() => {
-    const value = query.trim().toLocaleLowerCase("es");
-    if (!value) return [];
-    return [
-      ...sourcePatients.filter((p) => `${p.documentNumber} ${p.fullName}`.toLowerCase().includes(value)).map((p) => ({ id: p.id, title: p.fullName, meta: `DNI ${p.documentNumber}`, kind: "Paciente" })),
-      ...orders.filter((o) => `${o.code} ${o.documentNumber} ${o.patientName}`.toLowerCase().includes(value)).map((o) => ({ id: o.id, title: o.code, meta: `${o.patientName} · DNI ${o.documentNumber}`, kind: "Orden" })),
-    ].slice(0, 6);
-  }, [query, orders, sourcePatients]);
+  useEffect(() => {
+    let mounted = true;
+    const updateConnection = async () => {
+      if (!navigator.onLine) return mounted && setOnline(false);
+      try {
+        await fetch(`/login?connection-check=${Date.now()}`, { method: "HEAD", cache: "no-store" });
+        if (mounted) setOnline(true);
+      } catch {
+        if (mounted) setOnline(false);
+      }
+    };
+    void updateConnection();
+    const interval = window.setInterval(() => void updateConnection(), 30_000);
+    window.addEventListener("online", updateConnection);
+    window.addEventListener("offline", updateConnection);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+      window.removeEventListener("online", updateConnection);
+      window.removeEventListener("offline", updateConnection);
+    };
+  }, []);
 
   function openOrder(id: string) {
     setNewRecordOpen(false);
     setSelectedId(id);
     setView("trabajo");
-    setQuery("");
   }
 
   function updateOrder(next: LabOrder) {
@@ -97,24 +157,14 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
           ))}
         </nav>
         <div className="sidebar-foot">
-          <div className="lab-status"><span className="status-dot" /> Operación normal</div>
+          <div className={online ? "lab-status online" : "lab-status offline"}><span className="status-dot" />{online ? "Con conexión" : "Sin conexión"}</div>
           <div className="account"><span className="avatar">{(currentUser?.fullName ?? "Usuario").split(" ").slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span><span><strong>{currentUser?.fullName ?? "Usuario"}</strong><small>Administrador</small></span><button className="icon-button" aria-label="Cerrar sesión" onClick={signOut}><LogOut /></button></div>
         </div>
       </aside>
       <div className="app-body">
-        <header className="topbar">
-          <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Abrir menú"><Menu /></button>
-          <div className="global-search">
-            <Search aria-hidden="true" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar por DNI, paciente u orden…" aria-label="Búsqueda global" />
-            <kbd>Ctrl K</kbd>
-            {matches.length > 0 && <div className="search-results">{matches.map((match) => <button key={`${match.kind}-${match.id}`} onClick={() => match.kind === "Orden" ? openOrder(match.id) : setView("pacientes")}><span><small>{match.kind}</small><strong>{match.title}</strong><em>{match.meta}</em></span><ChevronRight /></button>)}</div>}
-          </div>
-          <button className="button primary" onClick={openNewRecord}><Plus /> Nuevo análisis</button>
-        </header>
+        <button className="shell-menu-button icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Abrir menú"><Menu /></button>
         {notice && <div className="toast" role="status"><Check />{notice}<button className="icon-button" onClick={() => setNotice("")}><X /></button></div>}
         <main className="workspace">
-          {view === "inicio" && <Dashboard orders={orders} summary={sourceSummary} openOrder={openOrder} />}
           {view === "trabajo" && (newRecordOpen ? <NewAnalysisWorkspace
             patients={sourcePatients}
             analyses={sourceAnalyses}
@@ -130,11 +180,11 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
               setSelectedId(id);
               setNewRecordOpen(false);
             }}
-          /> : <WorkQueue orders={orders} selectedId={selectedId} setSelectedId={setSelectedId} updateOrder={updateOrder} notify={setNotice} />)}
+          /> : <WorkQueue orders={orders} selectedId={selectedId} setSelectedId={setSelectedId} updateOrder={updateOrder} notify={setNotice} openNewRecord={openNewRecord} />)}
           {view === "pacientes" && <PatientsView patients={sourcePatients} orders={orders} openOrder={openOrder} notify={setNotice} />}
           {view === "analitica" && <AnalyticsView orders={orders} openOrder={openOrder} />}
           {view === "catalogo" && <CatalogView analyses={sourceAnalyses} />}
-          {view === "configuracion" && <SettingsView connected={Boolean(data)} />}
+          {view === "configuracion" && <SettingsView />}
         </main>
       </div>
     </div>
@@ -146,7 +196,7 @@ function PageHead({ eyebrow, title, text, action }: { eyebrow: string; title: st
 }
 
 function rpcMessage(message: string) {
-  if (message.includes("register_daily_analyses") || message.includes("record_order_group_print") || message.includes("record_order_batch_print")) return "La base de datos no está actualizada. Aplica la migración de órdenes diarias y vuelve a intentarlo.";
+  if (message.includes("register_daily_analyses")) return "La base de datos no está actualizada. Aplica la migración de órdenes diarias y vuelve a intentarlo.";
   if (message.includes("invalid_dni")) return "El DNI debe tener exactamente 8 dígitos.";
   if (message.includes("patient_name_required")) return "Ingresa el nombre completo del paciente.";
   if (message.includes("analyses_required")) return "Selecciona al menos un análisis.";
@@ -165,83 +215,6 @@ function rpcMessage(message: string) {
   if (message.includes("owner_required")) return "Solo una cuenta administradora puede aprobar el catálogo.";
   return "No se pudo completar la operación. Intenta nuevamente.";
 }
-
-function NewRecordDialog({ patients, analyses, initialOccurredAt, close, notify, onCreated }: { patients: LabData["patients"]; analyses: LabData["analyses"]; initialOccurredAt: string; close: () => void; notify: (message: string) => void; onCreated: (id: string) => void }) {
-  const router = useRouter();
-  const [dni, setDni] = useState("");
-  const [name, setName] = useState("");
-  const [occurredAt, setOccurredAt] = useState(initialOccurredAt);
-  const [selectedVersions, setSelectedVersions] = useState<string[]>([]);
-  const [analysisQuery, setAnalysisQuery] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const existing = patients.find((patient) => patient.documentNumber === dni);
-  const visibleAnalyses = analyses.filter((analysis) =>
-    analysis.active && analysis.versionId && `${analysis.code} ${analysis.name} ${analysis.group}`.toLocaleLowerCase("es").includes(analysisQuery.toLocaleLowerCase("es")),
-  );
-
-  function toggle(versionId: string) {
-    setSelectedVersions((current) => current.includes(versionId) ? current.filter((id) => id !== versionId) : [...current, versionId]);
-  }
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setError("");
-    if (!/^\d{8}$/.test(dni)) return setError("El DNI debe tener exactamente 8 dígitos.");
-    if (!existing && name.trim().length < 2) return setError("Ingresa el nombre completo del paciente.");
-    if (selectedVersions.length === 0) return setError("Selecciona al menos un análisis.");
-    setSaving(true);
-    const supabase = createClient();
-    let patientId = existing?.id;
-    if (!patientId) {
-      const patientResult = await supabase.rpc("upsert_simple_patient", { patient_dni: dni, patient_name: name.trim() });
-      if (patientResult.error) {
-        setSaving(false);
-        return setError(rpcMessage(patientResult.error.message));
-      }
-      patientId = (patientResult.data as { id: string } | null)?.id;
-    }
-    if (!patientId) {
-      setSaving(false);
-      return setError("No se pudo identificar al paciente.");
-    }
-    const orderResult = await supabase.rpc("create_simple_order", {
-      target_patient: patientId,
-      selected_analysis_versions: selectedVersions,
-      occurred_at: new Date(occurredAt).toISOString(),
-    });
-    setSaving(false);
-    if (orderResult.error) return setError(rpcMessage(orderResult.error.message));
-    const newOrderId = String(orderResult.data);
-    onCreated(newOrderId);
-    notify("Orden diaria guardada. Ya puedes ingresar los resultados.");
-    router.refresh();
-  }
-
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
-    <section className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="new-record-title">
-      <div className="dialog-head"><div><p className="eyebrow">Registro rápido</p><h2 id="new-record-title">Nuevo análisis</h2><p>Busca el DNI y selecciona los análisis realizados.</p></div><button className="icon-button" onClick={close} aria-label="Cerrar"><X /></button></div>
-      <form onSubmit={submit}>
-        <div className="dialog-fields">
-          <label>DNI<input autoFocus inputMode="numeric" maxLength={8} value={dni} onChange={(event) => { setDni(event.target.value.replace(/\D/g, "").slice(0, 8)); setError(""); }} placeholder="8 dígitos" /></label>
-          <label>Fecha y hora<input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label>
-        </div>
-        {existing ? <div className="patient-found"><Check /><span><small>Paciente encontrado</small><strong>{existing.fullName}</strong><small>Si ya tiene una orden en esa fecha, los análisis se agregarán a la misma.</small></span></div> :
-          <label>Nombre completo<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombres y apellidos" /></label>}
-        <div className="analysis-picker">
-          <div className="compact-search"><Search /><input value={analysisQuery} onChange={(event) => setAnalysisQuery(event.target.value)} placeholder="Buscar análisis o grupo…" aria-label="Buscar análisis" /></div>
-          <div className="analysis-options">{visibleAnalyses.map((analysis) => <label className={selectedVersions.includes(analysis.versionId) ? "analysis-option selected" : "analysis-option"} key={analysis.id}><input type="checkbox" checked={selectedVersions.includes(analysis.versionId)} onChange={() => toggle(analysis.versionId)} /><span><strong>{analysis.name}</strong><small>{analysis.group} · {analysis.unit || analysis.resultType}</small></span></label>)}
-            {visibleAnalyses.length === 0 && <div className="empty small"><Microscope /><p>No hay análisis disponibles. Carga primero el catálogo.</p></div>}
-          </div>
-        </div>
-        {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="dialog-actions"><span>{selectedVersions.length} seleccionados</span><div><button type="button" className="button secondary" onClick={close}>Cancelar</button><button className="button primary" disabled={saving}>{saving ? "Creando…" : "Crear registro"}</button></div></div>
-      </form>
-    </section>
-  </div>;
-}
-
-void NewRecordDialog;
 
 function AnalysisGlyph({ label }: { label: string }) {
   const normalized = label.toLocaleLowerCase("es");
@@ -285,8 +258,24 @@ function hasInvalidChoice(analysis: { qualitativeOptions?: string[] }, value: st
     && !analysis.qualitativeOptions!.includes(value.trim());
 }
 
+function sanitizeResultInput(type: "numeric" | "qualitative" | "text", rawValue: string) {
+  if (type === "numeric") {
+    const normalized = rawValue.replace(",", ".").replace(/[^0-9.-]/g, "");
+    const negative = normalized.startsWith("-");
+    const unsigned = normalized.replace(/-/g, "");
+    const [whole, ...decimals] = unsigned.split(".");
+    return `${negative ? "-" : ""}${whole}${decimals.length ? `.${decimals.join("")}` : ""}`;
+  }
+  if (type === "text") return rawValue.replace(/[0-9]/g, "");
+  return rawValue;
+}
+
 function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, notify, onCreated }: { patients: LabData["patients"]; analyses: LabData["analyses"]; initialOccurredAt: string; cancel: () => void; notify: (message: string) => void; onCreated: (id: string) => void }) {
   const router = useRouter();
+  const offlineRepository = useOfflineRepository();
+  const [patientReady, setPatientReady] = useState(false);
+  const [patientId, setPatientId] = useState("");
+  const [patientQuery, setPatientQuery] = useState("");
   const [dni, setDni] = useState("");
   const [name, setName] = useState("");
   const [birthAt, setBirthAt] = useState("");
@@ -298,10 +287,17 @@ function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, n
   const [selectedGroup, setSelectedGroup] = useState(groups[0]?.group ?? "");
   const [analysisQuery, setAnalysisQuery] = useState("");
   const [saving, setSaving] = useState(false);
+  const [patientSaving, setPatientSaving] = useState(false);
+  const [patientError, setPatientError] = useState("");
   const [error, setError] = useState("");
   const existing = patients.find((patient) => patient.documentNumber === dni);
   const currentGroup = groups.find((group) => group.group === selectedGroup) ?? groups[0] ?? null;
-  const visibleAnalyses = currentGroup ? filterPickerAnalyses(currentGroup.items, analysisQuery) : [];
+  const visibleAnalyses = analysisQuery.trim()
+    ? filterPickerAnalyses(groups.flatMap((group) => group.items), analysisQuery)
+    : currentGroup?.items ?? [];
+  const patientMatches = patientQuery.trim().length >= 2
+    ? patients.filter((patient) => `${patient.documentNumber} ${patient.fullName}`.toLocaleLowerCase("es").includes(patientQuery.trim().toLocaleLowerCase("es"))).slice(0, 6)
+    : [];
   const visibleSelected = useMemo(() => {
     const all = groups.flatMap((group) => group.items);
     return selectedVersions
@@ -327,7 +323,7 @@ function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, n
     const normalized = rawValue.replace(/\D/g, "").slice(0, 8);
     const matched = patients.find((patient) => patient.documentNumber === normalized);
     setDni(normalized);
-    setError("");
+    setPatientError("");
     if (matched) {
       setName(matched.fullName);
       setBirthAt(toLocalDateTimeInput(matched.birthAt || matched.birthDate));
@@ -339,78 +335,139 @@ function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, n
     }
   }
 
+  function choosePatient(patient: LabData["patients"][number]) {
+    setPatientQuery(`${patient.fullName} · ${patient.documentNumber}`);
+    setDni(patient.documentNumber);
+    setName(patient.fullName);
+    setBirthAt(toLocalDateTimeInput(patient.birthAt || patient.birthDate));
+    setSex(patient.sex === "U" ? "" : patient.sex);
+    setPatientError("");
+  }
+
+  async function preparePatient(event: React.FormEvent) {
+    event.preventDefault();
+    setPatientError("");
+    if (!/^\d{8}$/.test(dni)) return setPatientError("El DNI debe tener exactamente 8 dígitos.");
+    if (!existing && name.trim().length < 2) return setPatientError("Ingresa el nombre completo del paciente.");
+    if (!sex) return setPatientError("Selecciona el sexo del paciente.");
+    if (!birthAt) return setPatientError("Ingresa la fecha y hora de nacimiento.");
+    const birthTime = new Date(birthAt).getTime();
+    const analysisTime = new Date(occurredAt).getTime();
+    if (!Number.isFinite(birthTime) || !Number.isFinite(analysisTime)) return setPatientError("Revisa las fechas ingresadas.");
+    if (birthTime > analysisTime) return setPatientError("El nacimiento no puede ser posterior al análisis.");
+
+    setPatientSaving(true);
+    try {
+      if (offlineRepository) {
+        const saved = await offlineRepository.savePatient({
+          documentNumber: dni,
+          fullName: (existing?.fullName ?? name).trim(),
+          birthAt: new Date(birthAt).toISOString(),
+          sex: sex as "F" | "M" | "X",
+        });
+        setPatientId(saved.id);
+      } else {
+        const patientResult = await createClient().rpc("upsert_patient_with_demographics", {
+          patient_dni: dni,
+          patient_name: (existing?.fullName ?? name).trim(),
+          patient_birth_at: new Date(birthAt).toISOString(),
+          patient_sex: sex,
+        });
+        if (patientResult.error) throw patientResult.error;
+        const savedPatientId = (patientResult.data as { id: string } | null)?.id;
+        if (!savedPatientId) throw new Error("patient_id_missing");
+        setPatientId(savedPatientId);
+      }
+      setPatientReady(true);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "No se pudo guardar el paciente.";
+      setPatientError(rpcMessage(message));
+    } finally {
+      setPatientSaving(false);
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
-    if (!/^\d{8}$/.test(dni)) return setError("El DNI debe tener exactamente 8 digitos.");
-    if (!existing && name.trim().length < 2) return setError("Ingresa el nombre completo del paciente.");
-    if (!sex) return setError("Selecciona el sexo del paciente.");
-    if (!birthAt) return setError("Ingresa la fecha y hora de nacimiento.");
-    const birthTime = new Date(birthAt).getTime();
-    const analysisTime = new Date(occurredAt).getTime();
-    if (!Number.isFinite(birthTime) || !Number.isFinite(analysisTime)) return setError("Revisa las fechas ingresadas.");
-    if (birthTime > analysisTime) return setError("El nacimiento no puede ser posterior al análisis.");
+    if (!patientId) return setError("Selecciona primero al paciente.");
     if (selectedVersions.length === 0) return setError("Selecciona al menos un análisis.");
     if (visibleSelected.some((analysis) => !resultValues[analysis.versionId]?.trim())) return setError("Completa el resultado de cada análisis seleccionado.");
     if (visibleSelected.some((analysis) => hasInvalidChoice(analysis, resultValues[analysis.versionId] ?? ""))) return setError("Selecciona un resultado válido de la lista.");
     if (visibleSelected.some((analysis) => analysis.resultType === "numeric" && !Number.isFinite(Number(resultValues[analysis.versionId])))) return setError("Revisa los resultados numéricos antes de guardar.");
     setSaving(true);
-    const supabase = createClient();
-    const patientResult = await supabase.rpc("upsert_patient_with_demographics", {
-      patient_dni: dni,
-      patient_name: (existing?.fullName ?? name).trim(),
-      patient_birth_at: new Date(birthAt).toISOString(),
-      patient_sex: sex,
-    });
-    if (patientResult.error) {
+    try {
+      let newOrderId = "";
+      if (offlineRepository) {
+        const patient = patients.find((item) => item.id === patientId) ?? {
+          id: patientId,
+          documentNumber: dni,
+          fullName: (existing?.fullName ?? name).trim(),
+          birthAt: new Date(birthAt).toISOString(),
+          birthDate: birthAt.slice(0, 10),
+          sex: sex as "F" | "M" | "X",
+        };
+        newOrderId = await offlineRepository.registerAnalyses({
+          patient,
+          occurredAt: new Date(occurredAt).toISOString(),
+          entries: visibleSelected.map((analysis) => ({ analysis, value: resultValues[analysis.versionId] })),
+        });
+      } else {
+        const orderResult = await createClient().rpc("register_daily_analyses", {
+          target_patient: patientId,
+          occurred_at: new Date(occurredAt).toISOString(),
+          result_entries: visibleSelected.map((analysis) => ({
+            analysis_version_id: analysis.versionId,
+            payload: analysis.resultType === "numeric"
+              ? { numeric_value: Number(resultValues[analysis.versionId]) }
+              : analysis.resultType === "qualitative"
+                ? { qualitative_value: resultValues[analysis.versionId].trim() }
+                : { text_value: resultValues[analysis.versionId].trim() },
+          })),
+        });
+        if (orderResult.error) throw orderResult.error;
+        newOrderId = String((orderResult.data as { order_id?: string } | null)?.order_id ?? "");
+      }
+      if (!newOrderId) throw new Error("order_id_missing");
+      onCreated(newOrderId);
+      notify(offlineRepository?.enabled ? "Análisis guardados en este equipo y pendientes de sincronización." : "Análisis y resultados guardados en la orden diaria.");
+      if (!offlineRepository) router.refresh();
+    } catch (reason) {
+      setError(rpcMessage(reason instanceof Error ? reason.message : "No se pudo guardar la orden."));
+    } finally {
       setSaving(false);
-      return setError(rpcMessage(patientResult.error.message));
     }
-    const patientId = (patientResult.data as { id: string } | null)?.id;
-    if (!patientId) {
-      setSaving(false);
-      return setError("No se pudo identificar al paciente.");
-    }
-    const orderResult = await supabase.rpc("register_daily_analyses", {
-      target_patient: patientId,
-      occurred_at: new Date(occurredAt).toISOString(),
-      result_entries: visibleSelected.map((analysis) => ({
-        analysis_version_id: analysis.versionId,
-        payload: analysis.resultType === "numeric"
-          ? { numeric_value: Number(resultValues[analysis.versionId]) }
-          : analysis.resultType === "qualitative"
-            ? { qualitative_value: resultValues[analysis.versionId].trim() }
-            : { text_value: resultValues[analysis.versionId].trim() },
-      })),
-    });
-    setSaving(false);
-    if (orderResult.error) return setError(rpcMessage(orderResult.error.message));
-    const newOrderId = String((orderResult.data as { order_id?: string } | null)?.order_id ?? "");
-    if (!newOrderId) return setError("No se pudo identificar la orden guardada.");
-    onCreated(newOrderId);
-    notify("Análisis y resultados guardados en la orden diaria.");
-    router.refresh();
+  }
+
+  if (!patientReady) {
+    return <div className="dialog-backdrop patient-gate" role="presentation">
+      <section className="dialog-card patient-dialog" role="dialog" aria-modal="true" aria-labelledby="patient-dialog-title">
+        <div className="dialog-head"><div><p className="eyebrow">Nuevo análisis</p><h2 id="patient-dialog-title">Busca o registra al paciente</h2><p>Completa sus datos antes de ingresar los análisis.</p></div><button className="icon-button" onClick={cancel} aria-label="Cerrar"><X /></button></div>
+        <form onSubmit={preparePatient}>
+          <label className="patient-search-field">Buscar paciente<div className="compact-search"><Search /><input autoFocus value={patientQuery} onChange={(event) => { const value = event.target.value; setPatientQuery(value); if (/^\d{0,8}$/.test(value)) changeDni(value); }} placeholder="DNI o nombre completo" /></div></label>
+          {patientMatches.length > 0 && <div className="patient-search-results">{patientMatches.map((patient) => <button type="button" key={patient.id} onClick={() => choosePatient(patient)}><span className="avatar patient">{patient.fullName.split(" ").slice(0, 2).map((part) => part[0]).join("")}</span><span><strong>{patient.fullName}</strong><small>DNI {patient.documentNumber}</small></span><ChevronRight /></button>)}</div>}
+          <div className="dialog-fields patient-data-grid">
+            <label>DNI<input inputMode="numeric" maxLength={8} value={dni} onChange={(event) => changeDni(event.target.value)} placeholder="00000000" /></label>
+            <label>Nombre completo<input value={existing?.fullName ?? name} disabled={Boolean(existing)} onChange={(event) => setName(event.target.value.replace(/[0-9]/g, ""))} placeholder="Nombres y apellidos" /></label>
+            <label>Sexo<select value={sex} onChange={(event) => setSex(event.target.value as typeof sex)}><option value="">Seleccionar</option><option value="F">Femenino</option><option value="M">Masculino</option><option value="X">Otro</option></select></label>
+            <label>Fecha y hora de nacimiento<input type="datetime-local" max={occurredAt} value={birthAt} onChange={(event) => setBirthAt(event.target.value)} /></label>
+            <label>Fecha del análisis<div className="input-with-icon"><CalendarDays /><input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></div></label>
+          </div>
+          {existing && <div className="patient-found"><Check /><span><small>Paciente encontrado</small><strong>{existing.fullName}</strong></span></div>}
+          {patientError && <p className="form-error" role="alert">{patientError}</p>}
+          <div className="dialog-actions"><span>Los campos son obligatorios</span><div><button type="button" className="button secondary" onClick={cancel}>Cancelar</button><button className="button primary" disabled={patientSaving}>{patientSaving ? "Guardando…" : "Continuar"}<ChevronRight /></button></div></div>
+        </form>
+      </section>
+    </div>;
   }
 
   return <section className="new-analysis-flow" aria-labelledby="new-analysis-title">
-    <header className="registration-head">
-      <button className="back-action" type="button" onClick={cancel}><ArrowLeft />Volver a trabajo diario</button>
-      <div><p className="eyebrow">Registro de resultados</p><h1 id="new-analysis-title">Nuevo análisis</h1><p>Identifica al paciente, elige las pruebas y escribe sus resultados en una sola pantalla.</p></div>
-      <div className="registration-progress"><span className={dni.length === 8 ? "done" : ""}>1<i>Paciente</i></span><span className={selectedVersions.length ? "done" : ""}>2<i>Análisis</i></span><span className={visibleSelected.length > 0 && visibleSelected.every((analysis) => resultValues[analysis.versionId]?.trim()) ? "done" : ""}>3<i>Resultados</i></span></div>
+    <header className="registration-head compact-registration-head">
+      <button className="back-action" type="button" onClick={cancel}><ArrowLeft />Atrás</button>
+      <div><h1 id="new-analysis-title">Registrar análisis</h1><p>{existing?.fullName ?? name} · DNI {dni}</p></div>
+      <button className="text-button" type="button" onClick={() => setPatientReady(false)}>Cambiar paciente</button>
     </header>
     <form onSubmit={submit} className="registration-form">
-      <section className="patient-entry-card">
-        <div className="section-marker"><Users /><span><small>Paso 1</small><strong>Paciente y fecha</strong></span></div>
-        <div className="patient-entry-fields">
-          <label>DNI<input autoFocus inputMode="numeric" maxLength={8} value={dni} onChange={(event) => changeDni(event.target.value)} placeholder="00000000" /></label>
-          {!existing && <label>Nombre completo<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombres y apellidos" /></label>}
-          <label>Sexo<select value={sex} onChange={(event) => setSex(event.target.value as typeof sex)}><option value="">Seleccionar</option><option value="F">Femenino</option><option value="M">Masculino</option><option value="X">Otro</option></select></label>
-          <label>Fecha y hora de nacimiento<input type="datetime-local" max={occurredAt} value={birthAt} onChange={(event) => setBirthAt(event.target.value)} /></label>
-          <label>Fecha y hora<div className="input-with-icon"><CalendarDays /><input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></div></label>
-        </div>
-        {existing && <div className="patient-match"><Check /><span><small>Paciente encontrado</small><strong>{existing.fullName}</strong><em>Verifica sexo y nacimiento antes de guardar.</em></span></div>}
-      </section>
-
       <div className="registration-board">
         <nav className="analysis-group-rail" aria-label="Grupos de análisis">
           <div className="rail-title"><small>Paso 2</small><strong>Elige un grupo</strong></div>
@@ -420,9 +477,9 @@ function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, n
         </nav>
 
         <section className="analysis-tray">
-          <div className="tray-head"><div><small>Grupo activo</small><h2>{currentGroup?.group ?? "Análisis"}</h2></div><div className="compact-search"><Search /><input value={analysisQuery} onChange={(event) => setAnalysisQuery(event.target.value)} placeholder="Buscar prueba..." aria-label="Buscar análisis" /></div></div>
+          <div className="tray-head"><div><small>{analysisQuery.trim() ? "Todos los grupos" : "Grupo activo"}</small><h2>{analysisQuery.trim() ? "Resultados de búsqueda" : currentGroup?.group ?? "Análisis"}</h2></div><div className="compact-search global-analysis-search"><Search /><input value={analysisQuery} onChange={(event) => setAnalysisQuery(event.target.value)} placeholder="Buscar en todos los análisis…" aria-label="Buscar en todos los análisis" /></div></div>
           <div className="analysis-card-grid">
-            {visibleAnalyses.map((analysis) => { const selected = selectedVersions.includes(analysis.versionId); return <button type="button" className={selected ? "analysis-card selected" : "analysis-card"} key={analysis.id} onClick={() => toggle(analysis.versionId)} aria-pressed={selected}>
+            {visibleAnalyses.map((analysis) => { const selected = selectedVersions.includes(analysis.versionId); return <button type="button" className={selected ? "analysis-card selected" : "analysis-card"} key={analysis.versionId} onClick={() => toggle(analysis.versionId)} aria-pressed={selected}>
               <AnalysisGlyph label={`${analysis.group} ${analysis.name}`} />
               <span><strong>{analysis.name}</strong><small>{analysis.subsection ?? analysis.code}</small><em>{analysis.unit || (analysis.resultType === "qualitative" ? "Cualitativo" : "Texto")}</em></span>
               <i>{selected ? <Check /> : <Plus />}</i>
@@ -433,14 +490,14 @@ function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, n
 
         <aside className="result-capture">
           <div className="capture-head"><div><small>Paso 3</small><h2>Registra resultados</h2></div><span>{visibleSelected.length}</span></div>
-          {visibleSelected.length === 0 ? <div className="capture-empty"><TestTube2 /><strong>Selecciona una prueba</strong><p>Aparecerá aquí lista para ingresar su resultado.</p></div> : <div className="capture-list">{visibleSelected.map((analysis) => <article key={analysis.versionId} className="capture-row">
+          {visibleSelected.length === 0 ? <div className="capture-empty"><TestTube2 /><strong>Selecciona una prueba</strong><p>Aparecerá aquí lista para ingresar su resultado.</p></div> : <div className="capture-list">{visibleSelected.map((analysis) => { const rawValue = resultValues[analysis.versionId] ?? ""; const numericValue = Number(rawValue); const previewFlag = analysis.resultType === "numeric" && rawValue.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, analysis) : "normal"; return <article key={analysis.versionId} className={`capture-row ${previewFlag !== "normal" ? "outside-range" : ""}`}>
             <AnalysisGlyph label={`${analysis.group} ${analysis.name}`} />
             <div className="capture-copy"><strong>{analysis.name}</strong><small>{analysis.group} · {analysis.reference}</small></div>
             {analysis.qualitativeOptions?.length
               ? <ResultChoiceField id={analysis.versionId} value={resultValues[analysis.versionId] ?? ""} options={analysis.qualitativeOptions} onChange={(value) => setResultValues((current) => ({ ...current, [analysis.versionId]: value }))} label={`Resultado de ${analysis.name}`} />
-              : <div className="capture-input"><input value={resultValues[analysis.versionId] ?? ""} inputMode={analysis.resultType === "numeric" ? "decimal" : undefined} onChange={(event) => setResultValues((current) => ({ ...current, [analysis.versionId]: event.target.value }))} placeholder="Resultado" aria-label={`Resultado de ${analysis.name}`} /><span>{analysis.unit}</span></div>}
+              : <div className="capture-input"><input value={rawValue} inputMode={analysis.resultType === "numeric" ? "decimal" : "text"} onChange={(event) => setResultValues((current) => ({ ...current, [analysis.versionId]: sanitizeResultInput(analysis.resultType, event.target.value) }))} placeholder="Resultado" aria-label={`Resultado de ${analysis.name}`} /><span>{analysis.unit}</span>{previewFlag !== "normal" && <small className={`inline-range-warning ${previewFlag}`}><CircleAlert />Fuera del rango normal</small>}</div>}
             <button type="button" className="remove-analysis" onClick={() => removeSelected(analysis.versionId)} aria-label={`Quitar ${analysis.name}`}><X /></button>
-          </article>)}</div>}
+          </article>; })}</div>}
         </aside>
       </div>
 
@@ -450,68 +507,16 @@ function NewAnalysisWorkspace({ patients, analyses, initialOccurredAt, cancel, n
   </section>;
 }
 
-function Dashboard({ orders, summary, openOrder }: { orders: LabOrder[]; summary: LabData["summary"]; openOrder: (id: string) => void }) {
-  const criticalOrder = orders.find((order) => order.results.some((result) => result.flag === "critical"));
-  const drafts = orders.filter((order) => order.status === "draft").length;
-  const printed = orders.filter((order) => order.status === "validated" || order.status === "delivered").length;
-  const cards = [
-    ["Registros", String(summary.orders), "Periodo actual", ClipboardList],
-    ["Análisis realizados", String(summary.analyses), "Resultados solicitados", FlaskConical],
-    ["Pacientes", String(summary.patients), "Pacientes distintos", Users],
-    ["Impresos", String(printed), "Listos para entregar", Printer],
-  ] as const;
-  return <>
-    <PageHead eyebrow={new Intl.DateTimeFormat("es-PE", { dateStyle: "full" }).format(new Date())} title="Resumen del laboratorio" text="Actividad registrada en el sistema." action={<div className="period-control"><button className="active">Hoy</button><button>7 días</button><button>30 días</button></div>} />
-    <section className="metrics-grid" aria-label="Indicadores principales">{cards.map(([label, value, delta, Icon]) => <article className="metric" key={label}><div><span>{label}</span><strong>{value}</strong><small>{delta}</small></div><Icon /></article>)}</section>
-    <section className="dashboard-grid">
-      <article className="panel chart-panel">
-        <div className="panel-head"><div><h2>Actividad del laboratorio</h2><p>Órdenes recibidas y validadas por día</p></div><span className="legend"><i className="teal" />Recibidas <i className="blue" />Validadas</span></div>
-        {orders.length ? <ActivityChart orders={orders} /> : <div className="empty small"><BarChart3 /><p>Aún no hay registros para graficar.</p></div>}
-      </article>
-      <article className="panel attention-panel">
-        <div className="panel-head"><div><h2>Requieren atención</h2><p>Acciones clínicas pendientes</p></div></div>
-        {summary.criticalValues > 0 && criticalOrder && <button onClick={() => openOrder(criticalOrder.id)} className="attention critical"><CircleAlert /><span><strong>{summary.criticalValues} {summary.criticalValues === 1 ? "valor crítico" : "valores críticos"}</strong><small>{criticalOrder.code}</small></span><ChevronRight /></button>}
-        {drafts > 0 && <button className="attention neutral"><BookOpenCheck /><span><strong>{drafts} {drafts === 1 ? "registro pendiente" : "registros pendientes"}</strong><small>Faltan resultados o impresión</small></span><ChevronRight /></button>}
-        {summary.criticalValues === 0 && drafts === 0 && <div className="empty small"><Check /><p>No hay acciones pendientes.</p></div>}
-      </article>
-    </section>
-    <article className="panel">
-      <div className="panel-head"><div><h2>Órdenes recientes</h2><p>Últimos movimientos del turno</p></div><button className="text-button">Ver trabajo diario <ChevronRight /></button></div>
-      <OrderTable orders={orders} onSelect={openOrder} />
-    </article>
-  </>;
-}
-
-function ActivityChart({ orders }: { orders: LabOrder[] }) {
-  const days = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-    const next = new Date(date);
-    next.setDate(next.getDate() + 1);
-    const count = orders.filter((order) => {
-      const created = new Date(order.createdAt);
-      return created >= date && created < next;
-    }).length;
-    return { label: new Intl.DateTimeFormat("es-PE", { weekday: "short" }).format(date), count };
-  });
-  const maximum = Math.max(1, ...days.map((day) => day.count));
-  return <div className="bar-chart" aria-label="Gráfico: actividad semanal">
-    {days.map((day) => <div className="bar-group" key={day.label}><div className="bars" title={`${day.count} registros`}><i style={{ height: `${Math.max(3, day.count / maximum * 100)}%` }} /></div><span>{day.label}</span></div>)}
-  </div>;
-}
-
 function OrderTable({ orders, onSelect }: { orders: LabOrder[]; onSelect: (id: string) => void }) {
-  return <div className="table-wrap"><table><thead><tr><th>Orden</th><th>Paciente</th><th>Grupos</th><th>Ingreso</th><th>Responsable</th><th>Estado</th><th /></tr></thead>
-    <tbody>{orders.length ? orders.map((order) => <tr key={order.id} onClick={() => onSelect(order.id)} tabIndex={0}><td className="mono strong">{order.code}</td><td><strong>{order.patientName}</strong><small className="block mono">DNI {order.documentNumber}</small></td><td>{order.groups.join(" · ") || "Sin análisis"}</td><td>{new Date(order.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</td><td>{order.responsible}</td><td><span className={`status ${order.status}`}>{formatStatus(order.status)}</span></td><td><ChevronRight /></td></tr>) : <tr><td colSpan={7}><div className="empty small"><ClipboardList /><p>No hay órdenes registradas.</p></div></td></tr>}</tbody>
+  return <div className="table-wrap"><table><thead><tr><th>Orden</th><th>Paciente</th><th>Grupos</th><th>Ingreso</th><th>Responsable</th><th /></tr></thead>
+    <tbody>{orders.length ? orders.map((order) => <tr key={order.id} onClick={() => onSelect(order.id)} tabIndex={0}><td className="mono strong">{order.code}</td><td><strong>{order.patientName}</strong><small className="block mono">DNI {order.documentNumber}</small></td><td>{order.groups.join(" · ") || "Sin análisis"}</td><td>{new Date(order.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</td><td>{order.responsible}</td><td><ChevronRight /></td></tr>) : <tr><td colSpan={6}><div className="empty small"><ClipboardList /><p>No hay órdenes registradas.</p></div></td></tr>}</tbody>
   </table></div>;
 }
 
-function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify }: { orders: LabOrder[]; selectedId: string; setSelectedId: (id: string) => void; updateOrder: (o: LabOrder) => void; notify: (s: string) => void }) {
+function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify, openNewRecord }: { orders: LabOrder[]; selectedId: string; setSelectedId: (id: string) => void; updateOrder: (o: LabOrder) => void; notify: (s: string) => void; openNewRecord: () => void }) {
   const selected = orders.find((o) => o.id === selectedId) ?? orders[0] ?? null;
-  const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const visible = (filter === "all" ? orders : orders.filter((o) => o.status === filter)).filter((order) => {
+  const visible = orders.filter((order) => {
     const value = search.trim().toLocaleLowerCase("es");
     if (!value) return true;
     return `${order.code} ${order.patientName} ${order.documentNumber} ${order.groups.join(" ")}`
@@ -519,13 +524,11 @@ function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify }: {
       .includes(value);
   });
   return <>
-    <PageHead eyebrow="Operación" title="Trabajo diario" text="Registra resultados y continúa rápidamente donde lo dejaste." />
+    <PageHead eyebrow="Operación" title="Trabajo diario" text="Registra resultados y continúa rápidamente donde lo dejaste." action={<button className="button primary" onClick={openNewRecord}><Plus />Nuevo análisis</button>} />
     <div className="work-layout">
       <section className="panel order-list">
         <div className="compact-search"><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filtrar por orden, DNI o paciente" aria-label="Filtrar cola por orden, DNI o paciente" /></div>
-        <div className="filter-tabs"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>Todas</button>{statusOrder.map((s) => <button key={s} className={filter === s ? "active" : ""} onClick={() => setFilter(s)}>{formatStatus(s)}</button>)}</div>
-        <div className="compact-search"><Search /><input placeholder="Filtrar cola…" aria-label="Filtrar cola de órdenes" /></div>
-        <div className="queue">{visible.map((o) => <button key={o.id} className={o.id === selected?.id ? "queue-item selected" : "queue-item"} onClick={() => setSelectedId(o.id)}><span><strong className="mono">{o.code}</strong><b>{o.patientName}</b><small>{o.groups.join(" · ")}</small></span><span><em>{new Date(o.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</em><i className={`status-dot ${o.status}`} /></span></button>)}{visible.length === 0 && <div className="empty small"><ClipboardList /><p>No hay órdenes en esta cola.</p></div>}</div>
+        <div className="queue">{visible.map((o) => <button key={o.id} className={o.id === selected?.id ? "queue-item selected" : "queue-item"} onClick={() => setSelectedId(o.id)}><span><strong className="mono">{o.code}</strong><b>{o.patientName}</b><small>{o.groups.join(" · ")}</small></span><span><em>{new Date(o.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</em></span></button>)}{visible.length === 0 && <div className="empty small"><ClipboardList /><p>No hay órdenes en esta cola.</p></div>}</div>
       </section>
       {selected ? <ResultWorkspace key={`${selected.id}:${selected.results.map((result) => result.orderAnalysisId).join(",")}`} order={selected} updateOrder={updateOrder} notify={notify} /> : <section className="panel"><div className="empty"><Microscope /><h3>Sin registros</h3><p>Crea el primero después de cargar el catálogo.</p></div></section>}
     </div>
@@ -533,10 +536,11 @@ function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify }: {
 }
 
 function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; updateOrder: (o: LabOrder) => void; notify: (s: string) => void }) {
-  const router = useRouter();
+  const offlineRepository = useOfflineRepository();
   const [draft, setDraft] = useState(order.results);
   const [saving, setSaving] = useState(false);
-  const locked = order.status === "validated" || order.status === "delivered";
+  const [printing, setPrinting] = useState(false);
+  const [editingResultId, setEditingResultId] = useState<string | null>(null);
   const resultBatches = useMemo(() => groupResultsByBatch(draft, order.createdAt), [draft, order.createdAt]);
   const [selectedBatchId, setSelectedBatchId] = useState(resultBatches[0]?.batchId ?? "");
   const activeBatch = resultBatches.find((item) => item.batchId === selectedBatchId) ?? resultBatches[0];
@@ -545,10 +549,11 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
   function changeResult(id: string, value: string) {
     setDraft((results) => results.map((result) => {
       if (result.id !== id) return result;
-      if (result.resultType !== "numeric") return { ...result, value };
-      const numericValue = Number(value);
-      const flag = value.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, result) : "normal";
-      return { ...result, value, numericValue, flag };
+      const sanitized = sanitizeResultInput(result.resultType, value);
+      if (result.resultType !== "numeric") return { ...result, value: sanitized };
+      const numericValue = Number(sanitized);
+      const flag = sanitized.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, result) : "normal";
+      return { ...result, value: sanitized, numericValue, flag };
     }));
   }
 
@@ -588,6 +593,22 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
       return null;
     }
 
+    if (offlineRepository) {
+      try {
+        const saved = await offlineRepository.saveResults(order, savedResults);
+        setDraft(saved.results);
+        updateOrder({ ...order, results: saved.results, lockVersion: saved.lockVersion, syncState: offlineRepository.enabled ? "pending" : order.syncState });
+        setEditingResultId(null);
+        setSaving(false);
+        notify(offlineRepository.enabled ? "Resultados protegidos en este equipo; sincronización pendiente." : "Resultados guardados.");
+        return saved.lockVersion;
+      } catch (reason) {
+        setSaving(false);
+        notify(rpcMessage(reason instanceof Error ? reason.message : "save_failed"));
+        return null;
+      }
+    }
+
     const response = await supabase.rpc("save_result_batch", {
       target_revision: order.revisionId,
       result_entries: entries,
@@ -611,62 +632,91 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
 
     setDraft(savedResults);
     updateOrder({ ...order, results: savedResults, lockVersion });
+    setEditingResultId(null);
     setSaving(false);
     notify("Resultados guardados.");
     return lockVersion;
   }
 
   async function printReport() {
-    if (!activeBatch) return;
-    const lockVersion = locked ? order.lockVersion : await save();
-    if (lockVersion === null) return;
-    const legacyBatch = activeBatch.batchId.startsWith("legacy:");
-    const reportResponse = await fetch(`/api/reports/${order.id}`, {
-      method: "POST",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(legacyBatch
-        ? { expectedLockVersion: lockVersion, group: activeBatch.group }
-        : { expectedLockVersion: lockVersion, batchId: activeBatch.batchId }),
-    });
-    if (!reportResponse.ok) {
-      const error = await reportResponse.json().catch(() => null) as { error?: string } | null;
-      return notify(error?.error ? rpcMessage(error.error) : "No se pudo generar el informe. El registro sigue editable.");
+    if (!activeBatch || printing || saving) return;
+    setPrinting(true);
+    try {
+      const lockVersion = await save();
+      if (lockVersion === null) return;
+      if (offlineRepository?.enabled) {
+        const blob = await offlineRepository.buildOfflineReport(
+          { ...order, results: draft, lockVersion },
+          activeBatch.batchId,
+        );
+        if (!blob) throw new Error("offline_report_unavailable");
+        await printPdfInBrowser(blob);
+        return;
+      }
+      const legacyBatch = activeBatch.batchId.startsWith("legacy:");
+      const reportResponse = await fetch(`/api/reports/${order.id}`, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(legacyBatch
+          ? { group: activeBatch.group }
+          : { batchId: activeBatch.batchId }),
+      });
+      if (!reportResponse.ok) {
+        const error = await reportResponse.json().catch(() => null) as { error?: string } | null;
+        notify(error?.error ? rpcMessage(error.error) : "No se pudo generar el informe. El registro sigue editable.");
+        return;
+      }
+      await printPdfInBrowser(await reportResponse.blob());
+    } catch {
+      setSaving(false);
+      notify("No se pudo abrir el selector de impresión del navegador.");
+    } finally {
+      setPrinting(false);
     }
-    const reportBlob = await reportResponse.blob();
-    const nextStatus = (reportResponse.headers.get("X-Order-Status") as OrderStatus | null) ?? order.status;
-    const nextLockVersion = Number(reportResponse.headers.get("X-Lock-Version") ?? lockVersion);
-    updateOrder({ ...order, results: draft, status: nextStatus, lockVersion: nextLockVersion });
-    const reportUrl = URL.createObjectURL(reportBlob);
-    window.open(reportUrl, "_blank", "noopener,noreferrer");
-    window.setTimeout(() => URL.revokeObjectURL(reportUrl), 60_000);
-  }
-
-  async function amend() {
-    const reason = window.prompt("Motivo de la corrección:");
-    if (!reason) return;
-    const response = await createClient().rpc("amend_report", { target_order: order.id, amendment_reason: reason });
-    if (response.error) return notify(rpcMessage(response.error.message));
-    notify("Se creó una nueva revisión editable.");
-    router.refresh();
   }
 
   return <section className="panel result-workspace">
-    <div className="patient-strip"><div><span className="avatar patient">{order.patientName.split(" ").slice(0, 2).map((part) => part[0]).join("")}</span><span><small>{order.code}</small><strong>{order.patientName}</strong><em className="mono">DNI {order.documentNumber}</em></span></div><span className={`status ${order.status}`}>{formatStatus(order.status)}</span></div>
-    <div className="workflow-rail">{statusOrder.map((status, index) => { const current = locked ? 1 : 0; return <div className={index <= current ? "done" : ""} key={status}><i>{index < current ? <Check /> : index + 1}</i><span>{formatStatus(status)}</span></div>; })}</div>
+    <div className="patient-strip patient-summary">
+      <div className="patient-summary-main">
+        <div className="patient-identity"><span className="avatar patient large">{order.patientName.split(" ").slice(0, 2).map((part) => part[0]).join("")}</span><span><small>Paciente seleccionado</small><strong>{order.patientName}</strong><em className="mono">DNI {order.documentNumber}</em></span></div>
+        <div className="patient-order-context"><span>Registro</span><strong className="mono">{order.code}</strong><small><CalendarDays />{fmtDate(order.createdAt)}</small></div>
+      </div>
+      <dl className="patient-clinical-data">
+        <div className="age-data"><dt>Edad al registrar</dt><dd>{order.patientBirthAt ? formatPatientAgeAt(order.patientBirthAt, order.createdAt) : "No registrada"}</dd></div>
+        <div><dt>Fecha de nacimiento</dt><dd>{fmtBirthDate(order.patientBirthAt)}</dd></div>
+        <div><dt>Sexo</dt><dd>{sexLabel[order.patientSex]}</dd></div>
+        <div><dt>Teléfono</dt><dd>{order.patientPhone || "No registrado"}</dd></div>
+      </dl>
+    </div>
     {order.results.length === 0 ? <div className="empty"><Microscope /><h3>Este registro no tiene análisis</h3><p>Crea un nuevo registro seleccionando al menos un análisis.</p></div> : <>
       <div className="result-toolbar"><div><h2>Resultados por registro</h2><p>{draft.length} análisis · {resultBatches.length} tandas ordenadas por fecha</p></div></div>
       <nav className="result-group-menu" aria-label="Tandas realizadas">{resultBatches.map((item) => <button type="button" key={item.batchId} className={item.batchId === activeBatch?.batchId ? "active" : ""} onClick={() => setSelectedBatchId(item.batchId)}>
         <AnalysisGlyph label={item.group} /><span><strong>{item.group}</strong><small>{fmtDate(item.registeredAt)}</small></span><b>{item.results.length}</b>
       </button>)}</nav>
       {activeBatch && <div className="result-groups"><section className="result-group" aria-labelledby="active-result-group">
-        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group">{activeBatch.group}</h3></div><button className="button secondary" onClick={printReport} disabled={saving}><Printer />Imprimir esta tanda</button></div>
-        <div className="result-table table-wrap"><table><thead><tr><th>Análisis</th><th>Resultado</th><th>Unidad</th><th>Referencia</th><th>Bandera</th></tr></thead><tbody>{activeBatch.results.map((result) => <tr key={result.id}><td><strong>{result.analyte}</strong><small className="block">{result.method || "Método por definir"}</small><span className="performed-by-label"><Users />Realizado por {result.performedBy}</span></td><td>{result.qualitativeOptions?.length
-          ? <ResultChoiceField id={result.id} className={`result-input ${result.flag}`} value={result.value} options={result.qualitativeOptions} disabled={locked} onChange={(value) => changeResult(result.id, value)} label={`Resultado de ${result.analyte}`} />
-          : <input className={`result-input ${result.flag}`} value={result.value} disabled={locked} inputMode={result.resultType === "numeric" ? "decimal" : undefined} onChange={(event) => changeResult(result.id, event.target.value)} aria-label={`Resultado de ${result.analyte}`} />}</td><td className="mono">{result.unit}</td><td className="mono">{result.reference}</td><td><ResultFlag flag={result.flag} /></td></tr>)}</tbody></table></div>
+        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group">{activeBatch.group}</h3></div><button className="button secondary" onClick={printReport} disabled={saving || printing} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Preparando impresión…</> : <><Printer />Imprimir esta tanda</>}</button></div>
+        <div className="result-card-list">{activeBatch.results.map((result) => {
+          const editing = editingResultId === result.orderAnalysisId;
+          return <article key={result.id} className={editing ? "result-card editing" : "result-card"}>
+            <header className="result-card-head">
+              <div className="result-card-title"><AnalysisGlyph label={result.group} /><span><strong>{result.analyte}</strong><small>{result.method || "Método por definir"}</small></span></div>
+              <button type="button" className={editing ? "result-edit-button active" : "result-edit-button"} onClick={() => setEditingResultId(editing ? null : result.orderAnalysisId)} aria-pressed={editing}>{editing ? <Check /> : <Pencil />}{editing ? "Terminar edición" : "Editar resultado"}</button>
+            </header>
+            <div className="result-card-body">
+              <label className="result-value-field"><span>Resultado</span>{result.qualitativeOptions?.length
+                ? <ResultChoiceField id={result.id} className={`result-input ${result.flag}`} value={result.value} options={result.qualitativeOptions} disabled={!editing} onChange={(value) => changeResult(result.id, value)} label={`Resultado de ${result.analyte}`} />
+                : <input className={`result-input ${result.flag}`} value={result.value} inputMode={result.resultType === "numeric" ? "decimal" : undefined} disabled={!editing} onChange={(event) => changeResult(result.id, event.target.value)} aria-label={`Resultado de ${result.analyte}`} />}</label>
+              <div className="result-fact"><span>Unidad</span><strong className="mono">{result.unit || "—"}</strong></div>
+              <div className="result-fact reference"><span>Rango de referencia</span><strong>{result.reference || "No definido"}</strong></div>
+              <div className="result-fact flag-fact"><span>Evaluación</span><ResultFlag flag={result.flag} /></div>
+            </div>
+            <footer className="result-card-foot"><span><Users />Realizado por <strong>{result.performedBy}</strong></span>{editing && <small>Modifica el valor y pulsa «Terminar edición».</small>}</footer>
+          </article>;
+        })}</div>
       </section></div>}
       {critical && <div className="critical-notice"><CircleAlert /><span><strong>Hay un valor crítico</strong><small>Revísalo antes de imprimir. Esta advertencia no bloquea el registro.</small></span></div>}
-      <div className="action-bar"><span><ShieldCheck />Cada cambio queda registrado con usuario y hora.</span><div>{!locked && <button className="button primary" onClick={save} disabled={saving}>{saving ? "Guardando…" : "Guardar resultados"}</button>}{locked && <button className="button secondary" onClick={amend}><FileClock />Corregir resultados</button>}</div></div>
+      <div className="action-bar"><span><ShieldCheck />Los resultados pueden editarse cuando sea necesario.</span><div><button className="button primary" onClick={save} disabled={saving}>{saving ? "Guardando…" : "Guardar resultados"}</button></div></div>
     </>}
   </section>;
 }
@@ -678,6 +728,7 @@ function ResultFlag({ flag }: { flag: ResultValue["flag"] }) {
 
 function AddPatientDialog({ close, notify }: { close: () => void; notify: (message: string) => void }) {
   const router = useRouter();
+  const offlineRepository = useOfflineRepository();
   const [dni, setDni] = useState("");
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -689,12 +740,20 @@ function AddPatientDialog({ close, notify }: { close: () => void; notify: (messa
     if (!/^\d{8}$/.test(dni)) return setError("El DNI debe tener exactamente 8 dígitos.");
     if (name.trim().length < 2) return setError("Ingresa el nombre completo del paciente.");
     setSaving(true);
-    const response = await createClient().rpc("upsert_simple_patient", { patient_dni: dni, patient_name: name.trim() });
-    setSaving(false);
-    if (response.error) return setError(rpcMessage(response.error.message));
-    notify("Paciente agregado correctamente.");
-    close();
-    router.refresh();
+    try {
+      if (offlineRepository) await offlineRepository.savePatient({ documentNumber: dni, fullName: name.trim() });
+      else {
+        const response = await createClient().rpc("upsert_simple_patient", { patient_dni: dni, patient_name: name.trim() });
+        if (response.error) throw response.error;
+      }
+      notify(offlineRepository?.enabled ? "Paciente guardado en este equipo; sincronización pendiente." : "Paciente agregado correctamente.");
+      close();
+      if (!offlineRepository) router.refresh();
+    } catch (reason) {
+      setError(rpcMessage(reason instanceof Error ? reason.message : "patient_save_failed"));
+    } finally {
+      setSaving(false);
+    }
   }
 
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
@@ -718,6 +777,7 @@ type PatientImportPreview = {
 
 function PatientImportDialog({ close, notify }: { close: () => void; notify: (message: string) => void }) {
   const router = useRouter();
+  const offlineRepository = useOfflineRepository();
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<PatientImportPreview | null>(null);
   const [sheetName, setSheetName] = useState("");
@@ -748,6 +808,7 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
     setResult(null);
     setError("");
     if (!nextFile) return;
+    if (offlineRepository && !offlineRepository.online) return setError("La importación de Excel requiere conexión.");
     setLoading(true);
     const form = new FormData();
     form.append("action", "preview");
@@ -761,6 +822,7 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
   }
 
   async function importPatients() {
+    if (offlineRepository && !offlineRepository.online) return setError("La importación de Excel requiere conexión.");
     if (!file || !activeSheet) return;
     if (!nameColumn || !dniColumn || nameColumn === dniColumn) return setError("Mapea columnas diferentes para Nombre y DNI.");
     setError("");
@@ -777,7 +839,8 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
     if (!response.ok) return setError(data.error ?? "No se pudo importar el archivo.");
     setResult(data);
     notify(`${data.imported} pacientes importados o actualizados.`);
-    router.refresh();
+    if (offlineRepository) await offlineRepository.refresh();
+    else router.refresh();
   }
 
   const step = result ? 3 : preview ? 2 : 1;
@@ -808,6 +871,7 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
 
 function EditPatientDialog({ patient, close, notify }: { patient: LabData["patients"][number]; close: () => void; notify: (message: string) => void }) {
   const router = useRouter();
+  const offlineRepository = useOfflineRepository();
   const [name, setName] = useState(patient.fullName);
   const [birthAt, setBirthAt] = useState(toLocalDateTimeInput(patient.birthAt || patient.birthDate));
   const [sex, setSex] = useState<"F" | "M" | "X" | "">(patient.sex === "U" ? "" : patient.sex);
@@ -825,18 +889,33 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
     if (phone.trim().length > 30) return setError("El teléfono no puede superar 30 caracteres.");
 
     setSaving(true);
-    const response = await createClient().rpc("update_patient_details", {
-      target_patient: patient.id,
-      patient_name: name.trim(),
-      patient_birth_at: new Date(birthAt).toISOString(),
-      patient_sex: sex,
-      patient_phone: phone.trim() || null,
-    });
-    setSaving(false);
-    if (response.error) return setError(rpcMessage(response.error.message));
-    notify("Datos del paciente actualizados.");
-    close();
-    router.refresh();
+    try {
+      if (offlineRepository) {
+        await offlineRepository.updatePatient({
+          patient,
+          fullName: name.trim(),
+          birthAt: new Date(birthAt).toISOString(),
+          sex,
+          phone: phone.trim() || undefined,
+        });
+      } else {
+        const response = await createClient().rpc("update_patient_details", {
+          target_patient: patient.id,
+          patient_name: name.trim(),
+          patient_birth_at: new Date(birthAt).toISOString(),
+          patient_sex: sex,
+          patient_phone: phone.trim() || null,
+        });
+        if (response.error) throw response.error;
+      }
+      notify(offlineRepository?.enabled ? "Paciente actualizado localmente; sincronización pendiente." : "Datos del paciente actualizados.");
+      close();
+      if (!offlineRepository) router.refresh();
+    } catch (reason) {
+      setError(rpcMessage(reason instanceof Error ? reason.message : "patient_update_failed"));
+    } finally {
+      setSaving(false);
+    }
   }
 
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
@@ -857,6 +936,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
 }
 
 function PatientsView({ patients, orders, openOrder, notify }: { patients: LabData["patients"]; orders: LabOrder[]; openOrder: (id: string) => void; notify: (message: string) => void }) {
+  const offlineRepository = useOfflineRepository();
   const [selectedId, setSelectedId] = useState(patients[0]?.id ?? "");
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState(false);
@@ -869,7 +949,7 @@ function PatientsView({ patients, orders, openOrder, notify }: { patients: LabDa
     return `${patient.documentNumber} ${patient.fullName}`.toLocaleLowerCase("es").includes(value);
   });
   const selected = visiblePatients.find((patient) => patient.id === selectedId) ?? visiblePatients[0] ?? null;
-  const patientActions = <div className="patient-page-actions"><button className="button secondary" onClick={() => setImporting(true)}><Import />Importar</button><button className="button primary" onClick={() => setAdding(true)}><Plus />Agregar paciente</button></div>;
+  const patientActions = <div className="patient-page-actions"><button className="button secondary" disabled={Boolean(offlineRepository && !offlineRepository.online)} title={offlineRepository && !offlineRepository.online ? "La importación requiere internet" : undefined} onClick={() => setImporting(true)}><Import />Importar</button><button className="button primary" onClick={() => setAdding(true)}><Plus />Agregar paciente</button></div>;
   if (!selected) return <><PageHead eyebrow="Registro maestro" title="Pacientes" text="Identidad única e historial de análisis." action={patientActions} /><article className="panel"><div className="empty"><Users /><h3>No hay pacientes registrados</h3><p>Agrega el primer paciente por DNI para comenzar.</p><button className="button primary" onClick={() => setAdding(true)}>Agregar paciente</button></div></article>{adding && <AddPatientDialog close={() => setAdding(false)} notify={notify} />}{importing && <PatientImportDialog close={() => setImporting(false)} notify={notify} />}</>;
   const patientOrders = orders.filter((order) => order.patientId === selected.id);
   const patientResults = patientOrders.flatMap((order) => order.results.map((result) => ({ order, result })))
@@ -918,13 +998,6 @@ const dateInputValue = (date: Date) => {
 };
 const inputDate = (value: string, endOfDay = false) => new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00"}`);
 const analyticsDate = (date: Date) => new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short" }).format(date);
-const median = (values: number[]) => {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
-};
-
 function AnalyticsView({ orders, openOrder }: { orders: LabOrder[]; openOrder: (id: string) => void }) {
   const [openedAt] = useState(() => new Date().getTime());
   const latestDate = useMemo(() => orders.length
@@ -934,6 +1007,8 @@ function AnalyticsView({ orders, openOrder }: { orders: LabOrder[]; openOrder: (
   const [start, setStart] = useState(() => dateInputValue(new Date(initialEnd.getTime() - 29 * DAY_MS)));
   const [end, setEnd] = useState(() => dateInputValue(initialEnd));
   const [group, setGroup] = useState("");
+  const [chartMode, setChartMode] = useState<"group" | "analysis">("group");
+  const [chartAnalysis, setChartAnalysis] = useState("");
   const groups = useMemo(() => [...new Set(orders.flatMap((order) => [...order.groups, ...order.results.map((result) => result.group)]).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es")), [orders]);
   const startDate = inputDate(start || dateInputValue(initialEnd));
   const endDate = inputDate(end || dateInputValue(initialEnd), true);
@@ -953,10 +1028,9 @@ function AnalyticsView({ orders, openOrder }: { orders: LabOrder[]; openOrder: (
   const previousResults = previousOrders.flatMap(matchingResults);
   const patientCount = new Set(filteredOrders.map((order) => order.patientId)).size;
   const previousPatientCount = new Set(previousOrders.map((order) => order.patientId)).size;
-  const delivered = filteredOrders.filter((order) => order.status === "delivered" || order.status === "validated").length;
-  const previousDelivered = previousOrders.filter((order) => order.status === "delivered" || order.status === "validated").length;
+  const batches = new Set(filteredResults.map((result) => result.batchId)).size;
+  const previousBatches = new Set(previousResults.map((result) => result.batchId)).size;
   const critical = filteredResults.filter((result) => result.flag === "critical").length;
-  const turnaround = median(filteredOrders.map((order) => order.turnaroundMinutes).filter((value): value is number => typeof value === "number"));
 
   const comparisonLabel = (current: number, previous: number) => {
     if (!previous) return current ? "Nuevo frente al periodo anterior" : "Sin variación";
@@ -971,21 +1045,33 @@ function AnalyticsView({ orders, openOrder }: { orders: LabOrder[]; openOrder: (
 
   const bucketCount = Math.max(1, Math.min(12, Math.ceil(duration / DAY_MS)));
   const bucketSize = duration / bucketCount;
+  const chartGroups = [...new Set(filteredResults.map((result) => result.group))]
+    .map((name) => ({ name, count: filteredResults.filter((result) => result.group === name).length }))
+    .sort((left, right) => right.count - left.count)
+    .map((item) => item.name);
+  const chartAnalyses = [...new Set(filteredResults.map((result) => result.analyte))].sort((left, right) => left.localeCompare(right, "es"));
+  const activeChartAnalysis = chartAnalyses.includes(chartAnalysis) ? chartAnalysis : chartAnalyses[0] ?? "";
+  const chartSeries = chartMode === "group" ? chartGroups : activeChartAnalysis ? [activeChartAnalysis] : [];
   const chartData = Array.from({ length: bucketCount }, (_, index) => {
     const currentFrom = startDate.getTime() + index * bucketSize;
     const currentTo = index === bucketCount - 1 ? endDate.getTime() + 1 : currentFrom + bucketSize;
     const priorFrom = previousStart.getTime() + index * bucketSize;
     const priorTo = index === bucketCount - 1 ? previousEnd.getTime() + 1 : priorFrom + bucketSize;
+    const currentBucket = filteredOrders.filter((order) => { const value = new Date(order.createdAt).getTime(); return value >= currentFrom && value < currentTo; });
+    const previousBucket = previousOrders.filter((order) => { const value = new Date(order.createdAt).getTime(); return value >= priorFrom && value < priorTo; });
+    const currentBucketResults = currentBucket.flatMap(matchingResults);
+    const previousBucketResults = previousBucket.flatMap(matchingResults);
     return {
       label: analyticsDate(new Date(currentFrom)),
-      current: filteredOrders.filter((order) => { const value = new Date(order.createdAt).getTime(); return value >= currentFrom && value < currentTo; }).length,
-      previous: previousOrders.filter((order) => { const value = new Date(order.createdAt).getTime(); return value >= priorFrom && value < priorTo; }).length,
+      groups: Object.fromEntries(chartSeries.map((name) => [name, {
+        current: currentBucketResults.filter((result) => chartMode === "group" ? result.group === name : result.analyte === name).length,
+        previous: previousBucketResults.filter((result) => chartMode === "group" ? result.group === name : result.analyte === name).length,
+      }])),
     };
   });
 
   const groupDistribution = [...new Set(filteredResults.map((result) => result.group))].map((name) => ({ name, value: filteredResults.filter((result) => result.group === name).length })).sort((a, b) => b.value - a.value);
   const topAnalyses = [...new Set(filteredResults.map((result) => result.analyte))].map((name) => ({ name, value: filteredResults.filter((result) => result.analyte === name).length })).sort((a, b) => b.value - a.value).slice(0, 6);
-  const statusDistribution = filteredOrders.map((order) => order.status).reduce<Record<string, number>>((totals, status) => ({ ...totals, [status]: (totals[status] ?? 0) + 1 }), {});
   const criticalRows = filteredOrders.flatMap((order) => matchingResults(order).filter((result) => result.flag === "critical").map((result) => ({ order, result }))).slice(0, 8);
 
   const exportCsv = () => {
@@ -1013,33 +1099,67 @@ function AnalyticsView({ orders, openOrder }: { orders: LabOrder[]; openOrder: (
       <article className="metric"><div><span>Órdenes</span><strong>{filteredOrders.length}</strong><small>{comparisonLabel(filteredOrders.length, previousOrders.length)}</small></div><ClipboardList /></article>
       <article className="metric"><div><span>Resultados registrados</span><strong>{filteredResults.length}</strong><small>{comparisonLabel(filteredResults.length, previousResults.length)}</small></div><FlaskConical /></article>
       <article className="metric"><div><span>Pacientes únicos</span><strong>{patientCount}</strong><small>{comparisonLabel(patientCount, previousPatientCount)}</small></div><Users /></article>
-      <article className="metric"><div><span>Informes completados</span><strong>{delivered}</strong><small>{filteredOrders.length ? `${Math.round(delivered / filteredOrders.length * 100)}% de las órdenes` : "Sin órdenes"} · {comparisonLabel(delivered, previousDelivered)}</small></div><Check /></article>
+      <article className="metric"><div><span>Tandas registradas</span><strong>{batches}</strong><small>{comparisonLabel(batches, previousBatches)}</small></div><TestTube2 /></article>
     </section>
     {filteredOrders.length ? <>
-      <section className="analytics-insights"><div><CircleAlert /><span><small>Resultados críticos</small><strong>{critical}</strong></span></div><div><FileClock /><span><small>Mediana de entrega</small><strong>{turnaround === null ? "Sin datos" : `${turnaround} min`}</strong></span></div><div><Activity /><span><small>Promedio por orden</small><strong>{(filteredResults.length / filteredOrders.length).toFixed(1)}</strong></span></div></section>
+      <section className="analytics-insights"><div><CircleAlert /><span><small>Resultados críticos</small><strong>{critical}</strong></span></div><div><TestTube2 /><span><small>Grupos distintos</small><strong>{groupDistribution.length}</strong></span></div><div><Activity /><span><small>Promedio por orden</small><strong>{(filteredResults.length / filteredOrders.length).toFixed(1)}</strong></span></div></section>
       <section className="analytics-grid">
-        <article className="panel analytics-volume-panel"><div className="panel-head"><div><h2>Volumen comparado</h2><p>Órdenes del periodo actual contra el periodo anterior equivalente.</p></div><span className="legend"><i className="teal" />Actual <i className="muted-line" />Anterior</span></div><AnalyticsLineChart data={chartData} /></article>
+        <article className="panel analytics-volume-panel">
+          <div className="panel-head analytics-volume-head"><div><h2>{chartMode === "group" ? "Distribución de análisis por grupo" : "Evolución de un análisis"}</h2><p>{chartMode === "group" ? "Cada barra muestra el volumen del día y su composición por grupo." : "Consulta cuántas veces se realizó un análisis específico en cada día."}</p></div><div className="analytics-chart-controls"><div className="analytics-chart-mode" aria-label="Desglose del gráfico"><button type="button" className={chartMode === "group" ? "active" : ""} onClick={() => setChartMode("group")}>Por grupo</button><button type="button" className={chartMode === "analysis" ? "active" : ""} onClick={() => setChartMode("analysis")}>Por análisis</button></div>{chartMode === "analysis" && <select value={activeChartAnalysis} onChange={(event) => setChartAnalysis(event.target.value)} aria-label="Seleccionar análisis para la gráfica">{chartAnalyses.map((name) => <option key={name}>{name}</option>)}</select>}</div></div>
+          <AnalyticsStackedBarChart data={chartData} groups={chartSeries} detailLabel={chartMode === "group" ? "Detalle de grupos" : "Detalle del análisis"} />
+        </article>
         <article className="panel"><div className="panel-head"><div><h2>Distribución por grupo</h2><p>Resultados registrados</p></div></div><AnalyticsBars data={groupDistribution} emptyLabel="No hay grupos en este periodo." /></article>
         <article className="panel"><div className="panel-head"><div><h2>Análisis más realizados</h2><p>Los seis con mayor volumen</p></div></div><AnalyticsBars data={topAnalyses} emptyLabel="No hay análisis en este periodo." /></article>
-        <article className="panel"><div className="panel-head"><div><h2>Estado de órdenes</h2><p>Situación al cierre del periodo</p></div></div><div className="status-breakdown">{Object.entries(statusDistribution).map(([status, value]) => <div className="status-row" key={status}><span className={`status ${status}`}>{formatStatus(status as OrderStatus)}</span><i><b style={{ width: `${value / filteredOrders.length * 100}%` }} /></i><strong>{value}</strong></div>)}</div></article>
       </section>
       {criticalRows.length > 0 && <article className="panel analytics-critical"><div className="panel-head"><div><h2>Resultados críticos recientes</h2><p>Requieren seguimiento clínico.</p></div></div><div className="table-wrap"><table><thead><tr><th>Orden</th><th>Paciente</th><th>Análisis</th><th>Resultado</th><th>Fecha</th><th /></tr></thead><tbody>{criticalRows.map(({ order, result }) => <tr key={`${order.id}-${result.id}`}><td className="mono strong">{order.code}</td><td>{order.patientName}</td><td>{result.analyte}<small className="table-subline">{result.group}</small></td><td><span className="status critical">{result.value} {result.unit}</span></td><td>{fmtDate(result.registeredAt || order.createdAt)}</td><td><button className="text-button" onClick={() => openOrder(order.id)}>Ver orden <ChevronRight /></button></td></tr>)}</tbody></table></div></article>}
     </> : <article className="panel"><div className="empty"><BarChart3 /><h3>Sin datos para el periodo</h3><p>Ajusta las fechas o registra órdenes para habilitar los indicadores.</p></div></article>}
   </>;
 }
 
-function AnalyticsLineChart({ data }: { data: { label: string; current: number; previous: number }[] }) {
-  const maximum = Math.max(1, ...data.flatMap((point) => [point.current, point.previous]));
-  const x = (index: number) => 50 + index * (600 / Math.max(1, data.length - 1));
+const analyticsGroupColor = (index: number) => `hsl(${(174 + index * 47) % 360} 55% 40%)`;
+type AnalyticsChartPoint = { label: string; groups: Record<string, { current: number; previous: number }> };
+
+function AnalyticsStackedBarChart({ data, groups, detailLabel }: { data: AnalyticsChartPoint[]; groups: string[]; detailLabel: string }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [focusedGroup, setFocusedGroup] = useState<string | null>(null);
+  const totals = data.map((point) => groups.reduce((total, name) => total + (point.groups[name]?.current ?? 0), 0));
+  const maximum = Math.max(1, ...totals);
+  const x = (index: number) => 50 + (index + .5) * (600 / Math.max(1, data.length));
   const y = (value: number) => 190 - value / maximum * 145;
-  const currentPoints = data.map((point, index) => `${x(index)},${y(point.current)}`).join(" ");
-  const previousPoints = data.map((point, index) => `${x(index)},${y(point.previous)}`).join(" ");
+  const barWidth = Math.min(38, Math.max(16, 420 / Math.max(1, data.length)));
   const labelIndexes = new Set([0, Math.floor((data.length - 1) / 2), data.length - 1]);
-  return <svg className="analytics-chart" viewBox="0 0 700 240" role="img" aria-label="Comparación de órdenes entre el periodo actual y el anterior">
-    {[0, 0.5, 1].map((ratio) => <g key={ratio}><line x1="50" y1={y(maximum * ratio)} x2="650" y2={y(maximum * ratio)} /><text x="10" y={y(maximum * ratio) + 4}>{Math.round(maximum * ratio)}</text></g>)}
-    <polyline points={previousPoints} className="previous" /><polyline points={currentPoints} className="current" />
-    {data.map((point, index) => <g key={`${point.label}-${index}`}><circle cx={x(index)} cy={y(point.current)} r="4" className="current-point"><title>{point.label}: {point.current} órdenes</title></circle>{labelIndexes.has(index) && <text className="x-label" x={x(index)} y="225" textAnchor={index === 0 ? "start" : index === data.length - 1 ? "end" : "middle"}>{point.label}</text>}</g>)}
-  </svg>;
+  const selectedData = activeIndex === null ? null : data[activeIndex];
+
+  return <div className="analytics-chart-shell" onMouseLeave={() => setActiveIndex(null)}>
+    {groups.length > 1 && <div className="analytics-series-legend" aria-label="Series del gráfico">{groups.map((name, index) => <button type="button" key={name} className={focusedGroup === name ? "active" : ""} onClick={() => setFocusedGroup((current) => current === name ? null : name)} aria-pressed={focusedGroup === name}><i style={{ background: analyticsGroupColor(index) }} />{name}</button>)}</div>}
+    <div className="analytics-plot">
+      <svg className="analytics-chart" viewBox="0 0 700 240" role="img" aria-label="Distribución interactiva de análisis por grupo y periodo">
+        {[0, 0.5, 1].map((ratio) => <g className="analytics-grid-line" key={ratio}><line x1="50" y1={y(maximum * ratio)} x2="650" y2={y(maximum * ratio)} /><text x="12" y={y(maximum * ratio) + 4}>{Math.round(maximum * ratio)}</text></g>)}
+        {data.map((point, dataIndex) => <g key={`${point.label}-${dataIndex}`}>
+          {groups.map((name, groupIndex) => {
+            const value = point.groups[name]?.current ?? 0;
+            const stackTop = groups.slice(0, groupIndex + 1).reduce((total, groupName) => total + (point.groups[groupName]?.current ?? 0), 0);
+            const segmentTop = y(stackTop);
+            const segmentHeight = Math.max(0, y(stackTop - value) - segmentTop);
+            const dimmed = Boolean(focusedGroup && focusedGroup !== name);
+            if (!value) return null;
+            return <rect key={name} x={x(dataIndex) - barWidth / 2} y={segmentTop} width={barWidth} height={segmentHeight} rx="2" className="analytics-bar-segment" style={{ fill: analyticsGroupColor(groupIndex), opacity: dimmed ? .16 : 1 }} />;
+          })}
+          <text className="analytics-bar-total" x={x(dataIndex)} y={y(totals[dataIndex]) - 7} textAnchor="middle">{totals[dataIndex]}</text>
+          {labelIndexes.has(dataIndex) && <text className="x-label" x={x(dataIndex)} y="225" textAnchor="middle">{point.label}</text>}
+          <rect x={x(dataIndex) - Math.max(18, barWidth / 2)} y={Math.min(y(totals[dataIndex]) - 10, 170)} width={Math.max(36, barWidth)} height={Math.max(30, 200 - y(totals[dataIndex]))} rx="5" className={activeIndex === dataIndex ? "analytics-bar-target active" : "analytics-bar-target"} tabIndex={0} aria-label={`${point.label}: ${totals[dataIndex]} análisis. ${groups.map((name) => `${name}, ${point.groups[name]?.current ?? 0}`).join("; ")}`} onMouseEnter={() => setActiveIndex(dataIndex)} onFocus={() => setActiveIndex(dataIndex)} onBlur={() => setActiveIndex(null)} />
+        </g>)}
+      </svg>
+      {activeIndex !== null && selectedData && <div className={`analytics-chart-tooltip daily-detail ${activeIndex === 0 ? "at-start" : activeIndex === data.length - 1 ? "at-end" : ""} ${y(totals[activeIndex]) < 120 ? "below" : ""}`} style={{ left: `${x(activeIndex) / 7}%`, top: `${y(totals[activeIndex]) / 2.4}%` }} role="status">
+        <header><CalendarDays /><span><strong>{selectedData.label}</strong><small>{detailLabel} · {totals[activeIndex]} en total</small></span></header>
+        <div className="analytics-tooltip-breakdown">{groups.map((name, index) => {
+          const values = selectedData.groups[name] ?? { current: 0, previous: 0 };
+          return <div key={name}><i style={{ background: analyticsGroupColor(index) }} /><span title={name}>{name}</span><strong>{values.current}</strong><small>Anterior {values.previous}</small></div>;
+        })}</div>
+      </div>}
+    </div>
+    <p className="analytics-chart-hint">Pasa el cursor por una barra para ver el detalle completo de ese día y su comparación anterior.</p>
+  </div>;
 }
 
 function AnalyticsBars({ data, emptyLabel }: { data: { name: string; value: number }[]; emptyLabel: string }) {
@@ -1051,6 +1171,7 @@ function AnalyticsBars({ data, emptyLabel }: { data: { name: string; value: numb
 function CatalogView({ analyses }: { analyses: LabData["analyses"] }) {
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("");
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<LabData["analyses"][number] | null>(null);
   const groups = new Set(analyses.map((analysis) => analysis.group));
   const archived = analyses.filter((analysis) => !analysis.active).length;
@@ -1058,16 +1179,20 @@ function CatalogView({ analyses }: { analyses: LabData["analyses"] }) {
     (!group || analysis.group === group)
     && `${analysis.code} ${analysis.name}`.toLocaleLowerCase("es").includes(query.toLocaleLowerCase("es")),
   );
+  const pageCount = Math.max(1, Math.ceil(visible.length / 20));
+  const currentPage = Math.min(page, pageCount);
+  const pagedAnalyses = visible.slice((currentPage - 1) * 20, currentPage * 20);
   return <>
     <PageHead eyebrow="Gobierno clínico" title="Catálogo de análisis" text="Los elementos importados deben revisarse antes de usarse en una orden." />
     <div className="catalog-summary"><span><FlaskConical /><strong>{analyses.length - archived}</strong> análisis activos</span><span><Database /><strong>{groups.size}</strong> grupos</span><span><BookOpenCheck /><strong>{archived}</strong> por revisar</span></div>
-    <article className="panel"><div className="table-actions"><div className="compact-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar código o análisis…" aria-label="Buscar en el catálogo" /></div><select value={group} onChange={(event) => setGroup(event.target.value)} aria-label="Filtrar catálogo por grupo"><option value="">Todos los grupos</option>{[...groups].sort().map((name) => <option key={name}>{name}</option>)}</select></div><div className="table-wrap"><table><thead><tr><th>Código</th><th>Análisis</th><th>Grupo</th><th>Tipo</th><th>Unidad</th><th>Método</th><th>Referencia</th><th>Estado</th><th /></tr></thead><tbody>{visible.map((a) => <tr key={a.id}><td className="mono strong">{a.code}</td><td><strong>{a.name}</strong></td><td>{a.group}</td><td>{a.active ? (a.resultType === "numeric" ? "Numérico" : a.resultType === "qualitative" ? "Cualitativo" : "Texto") : "Por definir"}</td><td className="mono">{a.unit || "—"}</td><td>{a.method || "—"}</td><td className="mono">{a.active ? a.reference : "Pendiente"}</td><td><span className={`status ${a.active ? "validated" : "pending_validation"}`}>{a.active ? "Activo" : "Revisión pendiente"}</span></td><td><button className="text-button" onClick={() => setSelected(a)}>{a.active ? "Nueva versión" : "Revisar"} <ChevronRight /></button></td></tr>)}</tbody></table></div></article>
+    <article className="panel"><div className="table-actions"><div className="compact-search"><Search /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Buscar código o análisis…" aria-label="Buscar en el catálogo" /></div><select value={group} onChange={(event) => { setGroup(event.target.value); setPage(1); }} aria-label="Filtrar catálogo por grupo"><option value="">Todos los grupos</option>{[...groups].sort().map((name) => <option key={name}>{name}</option>)}</select></div><div className="table-wrap"><table><thead><tr><th>Código</th><th>Análisis</th><th>Grupo</th><th>Tipo</th><th>Unidad</th><th>Método</th><th>Referencia</th><th>Estado</th><th /></tr></thead><tbody>{pagedAnalyses.map((a) => <tr key={a.id}><td className="mono strong">{a.code}</td><td><strong>{a.name}</strong></td><td>{a.group}</td><td>{a.active ? (a.resultType === "numeric" ? "Numérico" : a.resultType === "qualitative" ? "Cualitativo" : "Texto") : "Por definir"}</td><td className="mono">{a.unit || "—"}</td><td>{a.method || "—"}</td><td className="mono">{a.active ? a.reference : "Pendiente"}</td><td><span className={`status ${a.active ? "validated" : "pending_validation"}`}>{a.active ? "Activo" : "Revisión pendiente"}</span></td><td><button className="text-button" onClick={() => setSelected(a)}>{a.active ? "Nueva versión" : "Revisar"} <ChevronRight /></button></td></tr>)}</tbody></table></div><footer className="catalog-pagination"><span>Mostrando {visible.length ? (currentPage - 1) * 20 + 1 : 0}–{Math.min(currentPage * 20, visible.length)} de {visible.length}</span><div><button type="button" className="button secondary" disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ArrowLeft />Atrás</button><strong>Página {currentPage} de {pageCount}</strong><button type="button" className="button secondary" disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Siguiente<ChevronRight /></button></div></footer></article>
     {selected && <CatalogApprovalDialog analysis={selected} close={() => setSelected(null)} />}
   </>;
 }
 
 function CatalogApprovalDialog({ analysis, close }: { analysis: LabData["analyses"][number]; close: () => void }) {
   const router = useRouter();
+  const offlineRepository = useOfflineRepository();
   const [resultType, setResultType] = useState<"numeric" | "qualitative" | "text">(analysis.active ? analysis.resultType : "numeric");
   const [sampleType, setSampleType] = useState(analysis.sampleType ?? "");
   const [method, setMethod] = useState(analysis.method ?? "");
@@ -1085,6 +1210,7 @@ function CatalogApprovalDialog({ analysis, close }: { analysis: LabData["analyse
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
+    if (offlineRepository && !offlineRepository.online) return setError("La aprobación del catálogo requiere conexión.");
     if (sampleType.trim().length < 2) return setError("Indica el tipo de muestra.");
     const parsedOptions = options.split(",").map((option) => option.trim()).filter(Boolean);
     const range: Record<string, string | number> = { label: referenceLabel.trim() };
@@ -1134,14 +1260,67 @@ function CatalogApprovalDialog({ analysis, close }: { analysis: LabData["analyse
   </div>;
 }
 
-function SettingsView({ connected }: { connected: boolean }) {
+function SettingsView() {
+  const offlineRepository = useOfflineRepository();
+  const [inviteName, setInviteName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviting, setInviting] = useState(false);
+  const [inviteMessage, setInviteMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  async function inviteUser(event: React.FormEvent) {
+    event.preventDefault();
+    setInviteMessage(null);
+    if (offlineRepository && !offlineRepository.online) return setInviteMessage({ type: "error", text: "Las invitaciones requieren conexión." });
+    if (inviteName.trim().length < 2) return setInviteMessage({ type: "error", text: "Ingresa el nombre completo del usuario." });
+    if (!/^\S+@\S+\.\S+$/.test(inviteEmail.trim())) return setInviteMessage({ type: "error", text: "Ingresa un correo válido." });
+    setInviting(true);
+    try {
+      const response = await fetch("/api/users/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fullName: inviteName.trim(), email: inviteEmail.trim().toLocaleLowerCase("es") }),
+      });
+      const payload = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) return setInviteMessage({ type: "error", text: payload?.error ?? "No se pudo enviar la invitación." });
+      setInviteMessage({ type: "success", text: `Invitación enviada a ${inviteEmail.trim()}.` });
+      setInviteName("");
+      setInviteEmail("");
+    } catch {
+      setInviteMessage({ type: "error", text: "No se pudo conectar con el servicio de invitaciones." });
+    } finally {
+      setInviting(false);
+    }
+  }
+
+  async function changePassword(event: React.FormEvent) {
+    event.preventDefault();
+    setPasswordMessage(null);
+    if (offlineRepository && !offlineRepository.online) return setPasswordMessage({ type: "error", text: "Cambiar la contraseña requiere conexión." });
+    if (password.length < 12) return setPasswordMessage({ type: "error", text: "La contraseña debe tener al menos 12 caracteres." });
+    if (password !== passwordConfirmation) return setPasswordMessage({ type: "error", text: "Las contraseñas no coinciden." });
+    setChangingPassword(true);
+    try {
+      const response = await createClient().auth.updateUser({ password });
+      if (response.error) return setPasswordMessage({ type: "error", text: "No se pudo cambiar la contraseña. Vuelve a iniciar sesión e inténtalo nuevamente." });
+      setPassword("");
+      setPasswordConfirmation("");
+      setPasswordMessage({ type: "success", text: "Contraseña actualizada." });
+    } catch {
+      setPasswordMessage({ type: "error", text: "No se pudo conectar con el servicio de autenticación." });
+    } finally {
+      setChangingPassword(false);
+    }
+  }
+
   return <>
-    <PageHead eyebrow="Administración" title="Configuración" text="Identidad del laboratorio, usuarios y políticas operativas." />
+    <PageHead eyebrow="Administración" title="Configuración" text="Gestiona el acceso de usuarios y actualiza tu contraseña." />
     <div className="settings-grid">
-      <article className="panel settings-card"><FlaskConical /><div><h2>Identidad del laboratorio</h2><p>Nombre legal, RUC, dirección, logotipo y responsables de firma.</p><button className="text-button">Configurar <ChevronRight /></button></div></article>
-      <article className="panel settings-card"><Users /><div><h2>Usuarios y acceso</h2><p>Los tres administradores activos tienen las mismas facultades.</p><button className="text-button">Ver usuarios <ChevronRight /></button></div></article>
-      <article className="panel settings-card"><ShieldCheck /><div><h2>Seguridad y retención</h2><p>Sesiones, política de correcciones, respaldos y conservación de informes.</p><button className="text-button">Revisar <ChevronRight /></button></div></article>
-      <article className="panel settings-card"><Database /><div><h2>Conexión de datos</h2><p>{connected ? "Supabase conectado con sesión y políticas RLS activas." : "Prototipo local con datos ficticios."}</p><span className={`status ${connected ? "validated" : "pending_validation"}`}>{connected ? "Conectado" : "Demostración"}</span></div></article>
+      <article className="panel settings-form-card"><div className="settings-card-head"><span><Mail /></span><div><h2>Usuarios y acceso</h2><p>Envía un enlace para que el nuevo usuario cree su contraseña.</p></div></div><form onSubmit={inviteUser}><label>Nombre completo<input value={inviteName} onChange={(event) => setInviteName(event.target.value)} autoComplete="name" maxLength={120} placeholder="Nombre del usuario" required /></label><label>Correo electrónico<input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} autoComplete="email" placeholder="usuario@correo.com" required /></label>{inviteMessage && <p className={`settings-message ${inviteMessage.type}`} role="status">{inviteMessage.type === "success" ? <Check /> : <CircleAlert />}{inviteMessage.text}</p>}<button className="button primary" disabled={inviting}><Send />{inviting ? "Enviando…" : "Enviar invitación"}</button></form></article>
+      <article className="panel settings-form-card"><div className="settings-card-head"><span><KeyRound /></span><div><h2>Cambiar contraseña</h2><p>Actualiza rápidamente la contraseña de tu sesión actual.</p></div></div><form onSubmit={changePassword}><label>Nueva contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={12} required /></label><label>Repite la contraseña<input type="password" value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} autoComplete="new-password" minLength={12} required /></label>{passwordMessage && <p className={`settings-message ${passwordMessage.type}`} role="status">{passwordMessage.type === "success" ? <Check /> : <CircleAlert />}{passwordMessage.text}</p>}<button className="button primary" disabled={changingPassword}><KeyRound />{changingPassword ? "Actualizando…" : "Cambiar contraseña"}</button></form></article>
     </div>
   </>;
 }

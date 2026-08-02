@@ -90,15 +90,3 @@ export function normalizeDocument(value: string) {
 export function isValidDni(value: string) {
   return /^\d{8}$/.test(normalizeDocument(value));
 }
-
-export function formatStatus(status: string) {
-  return (
-    {
-      draft: "Borrador",
-      pending_validation: "Completo",
-      validated: "Impreso",
-      delivered: "Impreso",
-      cancelled: "Anulado",
-    }[status] ?? status
-  );
-}

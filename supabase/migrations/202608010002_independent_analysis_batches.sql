@@ -56,11 +56,6 @@ for select using (public.current_profile_is_active());
 revoke all on public.order_analysis_batches from public, anon;
 grant select on public.order_analysis_batches to authenticated;
 
-drop trigger if exists order_analysis_batches_audit on public.order_analysis_batches;
-create trigger order_analysis_batches_audit
-after insert or update or delete on public.order_analysis_batches
-for each row execute function public.capture_audit_event();
-
 create or replace function public.register_daily_analyses(
   target_patient uuid,
   result_entries jsonb,
@@ -308,9 +303,6 @@ begin
           and num_nonnulls(rv.numeric_value, rv.text_value, rv.qualitative_value) = 1
       )
   ) then raise exception 'all_batch_results_required'; end if;
-
-  insert into public.audit_events(actor_id, action, entity_table, entity_id, reason)
-  values(auth.uid(), 'print_batch', 'orders', target_order::text, batch_group);
 
   if current_order.status in ('draft', 'pending_validation') and not exists (
     select 1 from public.order_analyses oa

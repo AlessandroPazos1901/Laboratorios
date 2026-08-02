@@ -39,6 +39,7 @@ npm run build
 - [Migración y conciliación del Excel](docs/MIGRATION.md)
 - [Despliegue en Vercel](docs/VERCEL.md)
 - [Controles clínicos y salida a producción](docs/CLINICAL-SAFETY.md)
+- [PWA, cifrado y continuidad sin internet](docs/OFFLINE-PWA.md)
 
 ## Límites de V1
 

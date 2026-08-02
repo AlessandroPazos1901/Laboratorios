@@ -224,27 +224,12 @@ create table public.import_rows (
   unique (batch_id, sheet_name, source_row)
 );
 
-create table public.audit_events (
-  id bigint generated always as identity primary key,
-  occurred_at timestamptz not null default clock_timestamp(),
-  actor_id uuid references public.profiles(id),
-  action text not null,
-  entity_table text not null,
-  entity_id text not null,
-  before_values jsonb,
-  after_values jsonb,
-  reason text,
-  import_batch_id uuid references public.import_batches(id)
-);
-
 create index patients_document_idx on public.patients (document_number);
 create index patients_name_search_idx on public.patients using gin (to_tsvector('simple', coalesce(first_names,'') || ' ' || coalesce(paternal_surname,'') || ' ' || coalesce(maternal_surname,'')));
 create index orders_patient_date_idx on public.orders (patient_id, ordered_at desc);
 create index orders_status_date_idx on public.orders (status, ordered_at desc);
 create index order_analyses_order_idx on public.order_analyses (order_id);
 create index result_values_revision_idx on public.result_values (revision_id);
-create index audit_entity_idx on public.audit_events (entity_table, entity_id, occurred_at desc);
-create index audit_actor_idx on public.audit_events (actor_id, occurred_at desc);
 
 create function public.current_profile_is_active()
 returns boolean language sql stable security definer set search_path = public
@@ -266,28 +251,6 @@ create trigger patients_touch before update on public.patients for each row exec
 create trigger orders_touch before update on public.orders for each row execute function public.touch_updated_at();
 create trigger result_values_touch before update on public.result_values for each row execute function public.touch_updated_at();
 create trigger profiles_touch before update on public.profiles for each row execute function public.touch_updated_at();
-
-create function public.capture_audit_event()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare
-  row_id text;
-begin
-  row_id := coalesce((case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end)->>'id', 'unknown');
-  insert into public.audit_events(actor_id, action, entity_table, entity_id, before_values, after_values)
-  values (auth.uid(), lower(tg_op), tg_table_name, row_id,
-          case when tg_op in ('UPDATE','DELETE') then to_jsonb(old) end,
-          case when tg_op in ('INSERT','UPDATE') then to_jsonb(new) end);
-  if tg_op = 'DELETE' then return old; end if;
-  return new;
-end; $$;
-
-create trigger patients_audit after insert or update or delete on public.patients for each row execute function public.capture_audit_event();
-create trigger orders_audit after insert or update or delete on public.orders for each row execute function public.capture_audit_event();
-create trigger result_revisions_audit after insert or update or delete on public.result_revisions for each row execute function public.capture_audit_event();
-create trigger result_values_audit after insert or update or delete on public.result_values for each row execute function public.capture_audit_event();
-create trigger analyses_audit after insert or update or delete on public.analyses for each row execute function public.capture_audit_event();
-create trigger analysis_versions_audit after insert or update or delete on public.analysis_versions for each row execute function public.capture_audit_event();
-create trigger report_versions_audit after insert or update or delete on public.report_versions for each row execute function public.capture_audit_event();
 
 create function public.search_patients(search_text text, result_limit integer default 20)
 returns table(id uuid, document_type text, document_number text, full_name text, birth_date date, sex text)
@@ -363,8 +326,6 @@ begin
   select new_revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot,auth.uid(),auth.uid()
   from public.result_values where revision_id=previous_revision.id;
   update public.orders set status='draft', lock_version=lock_version+1 where id=target_order;
-  insert into public.audit_events(actor_id,action,entity_table,entity_id,reason)
-  values(auth.uid(),'amend','orders',target_order::text,trim(amendment_reason));
   return new_revision_id;
 end; $$;
 
@@ -383,7 +344,6 @@ alter table public.result_values enable row level security;
 alter table public.report_versions enable row level security;
 alter table public.import_batches enable row level security;
 alter table public.import_rows enable row level security;
-alter table public.audit_events enable row level security;
 
 create policy profiles_self_read on public.profiles for select using (id=auth.uid() or public.current_profile_is_owner());
 create policy profiles_owner_all on public.profiles for all using (public.current_profile_is_owner()) with check (public.current_profile_is_owner());
@@ -409,7 +369,6 @@ create policy values_staff_read on public.result_values for select using (public
 create policy reports_staff_read on public.report_versions for select using (public.current_profile_is_active());
 create policy imports_staff_read on public.import_batches for select using (public.current_profile_is_active());
 create policy import_rows_staff_read on public.import_rows for select using (public.current_profile_is_active());
-create policy audit_staff_read on public.audit_events for select using (public.current_profile_is_active());
 
 -- Escritura clínica directa mínima; transiciones y correcciones deben usar RPC.
 create policy orders_staff_insert on public.orders for insert with check (public.current_profile_is_active() and created_by=auth.uid() and updated_by=auth.uid() and status='draft');
@@ -422,7 +381,6 @@ create policy values_staff_update_draft on public.result_values for update
 create policy imports_staff_insert on public.import_batches for insert with check (public.current_profile_is_active() and created_by=auth.uid());
 create policy import_rows_staff_insert on public.import_rows for insert with check (public.current_profile_is_active());
 
-revoke insert, update, delete on public.audit_events from anon, authenticated;
 revoke update, delete on public.report_versions from anon, authenticated;
 grant execute on function public.search_patients(text, integer) to authenticated;
 grant execute on function public.submit_for_validation(uuid, integer) to authenticated;

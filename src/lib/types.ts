@@ -1,10 +1,3 @@
-export type OrderStatus =
-  | "draft"
-  | "pending_validation"
-  | "validated"
-  | "delivered"
-  | "cancelled";
-
 export type ResultFlag = "normal" | "low" | "high" | "critical" | "unreviewed";
 
 export type Patient = {
@@ -15,16 +8,16 @@ export type Patient = {
   birthAt: string;
   sex: "F" | "M" | "X" | "U";
   phone?: string;
+  syncVersion?: number;
+  syncState?: "synced" | "pending" | "conflict";
+  clientMutationId?: string;
 };
 
 export type AnalyticsSummary = {
   orders: number;
   analyses: number;
   patients: number;
-  delivered: number;
-  pendingValidation: number;
   criticalValues: number;
-  medianTurnaroundMinutes: number | null;
 };
 
 export type LabData = {
@@ -33,11 +26,13 @@ export type LabData = {
   analyses: AnalysisDefinition[];
   trend: { date: string; value: number }[];
   summary: AnalyticsSummary;
+  reportSettings?: { tradeName: string; footer: string };
 };
 
 export type ResultValue = {
   id: string;
   orderAnalysisId: string;
+  analysisVersionId?: string;
   batchId: string;
   registeredAt: string;
   analyte: string;
@@ -61,16 +56,20 @@ export type LabOrder = {
   id: string;
   revisionId: string;
   lockVersion: number;
+  revisionNumber?: number;
   code: string;
   patientId: string;
   patientName: string;
   documentNumber: string;
+  patientBirthAt: string;
+  patientSex: Patient["sex"];
+  patientPhone?: string;
   createdAt: string;
-  status: OrderStatus;
   groups: string[];
   responsible: string;
-  turnaroundMinutes?: number;
   results: ResultValue[];
+  syncState?: "synced" | "pending" | "conflict";
+  clientMutationId?: string;
 };
 
 export type AnalysisDefinition = {
@@ -87,6 +86,10 @@ export type AnalysisDefinition = {
   sampleType?: string;
   decimals?: number;
   qualitativeOptions?: string[];
+  low?: number;
+  high?: number;
+  criticalLow?: number;
+  criticalHigh?: number;
   subsection?: string;
   common?: boolean;
   pickerOrder?: number;

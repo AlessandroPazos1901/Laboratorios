@@ -41,8 +41,7 @@ revoke insert, update, delete on table
   public.result_values,
   public.report_versions,
   public.import_batches,
-  public.import_rows,
-  public.audit_events
+  public.import_rows
 from anon, authenticated;
 
 drop policy if exists patients_staff_all on public.patients;

@@ -175,9 +175,6 @@ begin
     where id = latest_revision.id;
   end if;
 
-  insert into public.audit_events(actor_id, action, entity_table, entity_id)
-  values(auth.uid(), 'print', 'orders', target_order::text);
-
   return current_order;
 end;
 $$;
@@ -202,8 +199,6 @@ begin
 
   if changed.id is null then raise exception 'invalid_state'; end if;
 
-  insert into public.audit_events(actor_id, action, entity_table, entity_id, reason)
-  values(auth.uid(), 'cancel', 'orders', target_order::text, trim(cancellation));
   return changed;
 end;
 $$;
