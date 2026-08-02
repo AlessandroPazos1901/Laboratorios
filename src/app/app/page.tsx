@@ -1,14 +1,12 @@
 import { redirect } from "next/navigation";
 import { LabApp } from "@/components/lab-app";
-import { createClient } from "@/lib/supabase/server";
 import { loadLabData } from "@/lib/supabase/load-lab-data";
+import { createClient } from "@/lib/supabase/server";
 
-export const metadata = { title: "Área de trabajo" };
+export const metadata = { title: "Area de trabajo" };
 export const dynamic = "force-dynamic";
 
 export default async function ApplicationPage() {
-  if (process.env.NEXT_PUBLIC_DEMO_MODE === "true") return <LabApp />;
-
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
@@ -22,9 +20,9 @@ export default async function ApplicationPage() {
   if (!profile?.active) {
     return <main className="setup-required">
       <section className="panel">
-        <p className="eyebrow">Configuración pendiente</p>
-        <h1>El usuario aún no tiene un perfil activo</h1>
-        <p>Ejecuta la migración <span className="mono">202607240004_auth_profile_bootstrap.sql</span> y vuelve a iniciar sesión.</p>
+        <p className="eyebrow">Configuracion pendiente</p>
+        <h1>El usuario aun no tiene un perfil activo</h1>
+        <p>Ejecuta la migracion <span className="mono">202607240004_auth_profile_bootstrap.sql</span> y vuelve a iniciar sesion.</p>
       </section>
     </main>;
   }

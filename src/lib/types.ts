@@ -12,6 +12,7 @@ export type Patient = {
   documentNumber: string;
   fullName: string;
   birthDate: string;
+  birthAt: string;
   sex: "F" | "M" | "X" | "U";
   phone?: string;
 };
@@ -30,7 +31,6 @@ export type LabData = {
   patients: Patient[];
   orders: LabOrder[];
   analyses: AnalysisDefinition[];
-  auditEvents: AuditEvent[];
   trend: { date: string; value: number }[];
   summary: AnalyticsSummary;
 };
@@ -38,6 +38,8 @@ export type LabData = {
 export type ResultValue = {
   id: string;
   orderAnalysisId: string;
+  batchId: string;
+  registeredAt: string;
   analyte: string;
   group: string;
   resultType: "numeric" | "qualitative" | "text";
@@ -51,6 +53,7 @@ export type ResultValue = {
   criticalHigh?: number;
   flag: ResultFlag;
   method: string;
+  performedBy: string;
   qualitativeOptions?: string[];
 };
 
@@ -70,16 +73,6 @@ export type LabOrder = {
   results: ResultValue[];
 };
 
-export type AuditEvent = {
-  id: string;
-  occurredAt: string;
-  actor: string;
-  action: string;
-  entity: string;
-  summary: string;
-  reason?: string;
-};
-
 export type AnalysisDefinition = {
   id: string;
   versionId: string;
@@ -94,4 +87,7 @@ export type AnalysisDefinition = {
   sampleType?: string;
   decimals?: number;
   qualitativeOptions?: string[];
+  subsection?: string;
+  common?: boolean;
+  pickerOrder?: number;
 };

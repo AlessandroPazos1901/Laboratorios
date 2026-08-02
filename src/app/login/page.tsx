@@ -12,44 +12,43 @@ export default function LoginPage() {
   const [visible, setVisible] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const demoEnabled = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
   async function signIn(event: React.FormEvent) {
     event.preventDefault();
     setError("");
     if (!isSupabaseConfigured) {
-      setError("La conexión segura todavía no fue configurada.");
+      setError("La conexion segura todavia no fue configurada.");
       return;
     }
     setLoading(true);
     const { error: authError } = await createClient().auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (authError) return setError("Correo o contraseña incorrectos.");
+    if (authError) return setError("Correo o contrasena incorrectos.");
     router.replace("/app");
     router.refresh();
   }
 
   async function recoverPassword() {
     setError("");
-    if (!email) return setError("Ingresa tu correo para solicitar la recuperación.");
-    if (!isSupabaseConfigured) return setError("La recuperación estará disponible al conectar Supabase.");
+    if (!email) return setError("Ingresa tu correo para solicitar la recuperacion.");
+    if (!isSupabaseConfigured) return setError("La recuperacion estara disponible al conectar Supabase.");
     setLoading(true);
     const { error: recoveryError } = await createClient().auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}/reset-password`,
     });
     setLoading(false);
-    if (recoveryError) return setError("No se pudo enviar la recuperación. Intenta nuevamente.");
-    setError("Si el correo está registrado, recibirá instrucciones para crear una nueva contraseña.");
+    if (recoveryError) return setError("No se pudo enviar la recuperacion. Intenta nuevamente.");
+    setError("Si el correo esta registrado, recibira instrucciones para crear una nueva contrasena.");
   }
 
   return (
     <main className="login-shell">
-      <section className="login-context" aria-label="Información del sistema">
-        <div className="brand-mark"><Activity aria-hidden="true" /><span>LIMS José</span></div>
+      <section className="login-context" aria-label="Informacion del sistema">
+        <div className="brand-mark"><Activity aria-hidden="true" /><span>LIMS Jose</span></div>
         <div className="login-message">
-          <p className="eyebrow">Área de trabajo clínica</p>
+          <p className="eyebrow">Area de trabajo clinica</p>
           <h1>Resultados confiables.<br />Trazabilidad completa.</h1>
-          <p>Gestión diaria de pacientes, órdenes, resultados e informes en un solo lugar.</p>
+          <p>Gestion diaria de pacientes, ordenes, resultados e informes en un solo lugar.</p>
         </div>
         <div className="security-note"><ShieldCheck aria-hidden="true" /><span>Acceso restringido al personal autorizado</span></div>
       </section>
@@ -57,27 +56,22 @@ export default function LoginPage() {
         <form className="login-card" onSubmit={signIn}>
           <div>
             <p className="eyebrow">Bienvenido</p>
-            <h2>Iniciar sesión</h2>
+            <h2>Iniciar sesion</h2>
             <p className="muted">Ingresa con la cuenta asignada por el laboratorio.</p>
           </div>
-          <label>Correo electrónico
+          <label>Correo electronico
             <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="nombre@laboratorio.pe" required />
           </label>
-          <label>Contraseña
+          <label>Contrasena
             <span className="password-field">
               <input type={visible ? "text" : "password"} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-              <button type="button" className="icon-button" onClick={() => setVisible(!visible)} aria-label={visible ? "Ocultar contraseña" : "Mostrar contraseña"}>{visible ? <EyeOff /> : <Eye />}</button>
+              <button type="button" className="icon-button" onClick={() => setVisible(!visible)} aria-label={visible ? "Ocultar contrasena" : "Mostrar contrasena"}>{visible ? <EyeOff /> : <Eye />}</button>
             </span>
           </label>
-          <button className="text-button login-recovery" type="button" onClick={recoverPassword}>¿Olvidaste tu contraseña?</button>
+          <button className="text-button login-recovery" type="button" onClick={recoverPassword}>Olvidaste tu contrasena?</button>
           {error && <p className="form-error" role="alert">{error}</p>}
-          <button className="button primary wide" type="submit" disabled={loading}>{loading ? "Verificando…" : <>Ingresar <ArrowRight /></>}</button>
-          {demoEnabled && (
-            <button className="button secondary wide" type="button" onClick={() => router.push("/app")}>
-              Revisar prototipo con datos ficticios
-            </button>
-          )}
-          <p className="login-help">¿No puedes ingresar? Contacta al propietario del sistema.</p>
+          <button className="button primary wide" type="submit" disabled={loading}>{loading ? "Verificando..." : <>Ingresar <ArrowRight /></>}</button>
+          <p className="login-help">Si no puedes ingresar, contacta al propietario del sistema.</p>
         </form>
       </section>
     </main>

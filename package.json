@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "db:apply-daily-orders": "node scripts/apply-daily-order-grouping.mjs"
   },
   "dependencies": {
     "@fontsource/atkinson-hyperlegible": "^5.3.0",
@@ -20,6 +21,7 @@
     "lucide-react": "^1.26.0",
     "next": "16.2.11",
     "pdf-lib": "^1.17.1",
+    "pg": "^8.16.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "zod": "^4.4.3"
