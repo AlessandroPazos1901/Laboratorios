@@ -30,6 +30,7 @@ const emptyData: LabData = {
     low: 70,
     high: 110,
   }],
+  analysts: [{ id: "analyst-1", fullName: "Tecnólogo Prueba", active: true }],
   trend: [],
   summary: { orders: 0, analyses: 0, patients: 0, criticalValues: 0 },
 };
@@ -57,8 +58,8 @@ describe("cifrado offline", () => {
 describe("materialización local", () => {
   it("crea paciente y orden provisional con resultado calculado", () => {
     const patient: Patient = {
-      id: crypto.randomUUID(), documentNumber: "12345678", fullName: "Paciente Prueba",
-      birthDate: "1990-01-01", birthAt: "1990-01-01T05:00:00.000Z", sex: "F",
+      id: 12345678, documentNumber: "12345678", fullName: "Paciente Prueba",
+      birthDate: "1990-01-01", sex: "F",
       syncVersion: 1, syncState: "pending",
     };
     const withPatient = materializePatient(emptyData, patient);
@@ -66,13 +67,19 @@ describe("materialización local", () => {
       data: withPatient,
       patient,
       occurredAt: "2026-08-02T15:00:00.000Z",
-      entries: [{ analysis: emptyData.analyses[0], value: "140" }],
+      entries: [
+        { analysis: emptyData.analyses[0], value: "140" },
+        { analysis: { ...emptyData.analyses[0], id: "blank-analysis", versionId: "blank-version", name: "No realizado" }, value: "   " },
+      ],
+      analyst: emptyData.analysts[0],
       mutationId: crypto.randomUUID(),
       actorName: "Tecnólogo Prueba",
     });
     expect(output.data.patients).toHaveLength(1);
     expect(output.data.orders).toHaveLength(1);
     expect(output.order.results[0].flag).toBe("high");
+    expect(output.order.results[0]).toMatchObject({ analystId: "analyst-1", performedBy: "Tecnólogo Prueba" });
+    expect(output.order.results).toHaveLength(1);
     expect(output.data.summary).toMatchObject({ orders: 1, analyses: 1, patients: 1 });
   });
 });

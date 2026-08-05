@@ -21,6 +21,16 @@ El responsable legal debe aprobar privacidad, retención, contratos de encargado
 - Valor crítico: advertencia visible no bloqueante.
 - Corrección posterior a impresión: nueva revisión y motivo obligatorio.
 - Snapshot clínico: el informe histórico no cambia cuando cambia el catálogo.
+- Cuenta técnica compartida: cada análisis exige seleccionar una identidad de
+  `analysts`; `profiles` no forma parte del modelo y la autoría clínica es el
+  analista declarado.
+- Nacimiento: se registra solo la fecha. En neonatos, la interfaz expresa la
+  edad en días y no inventa horas que no fueron capturadas.
+- Hemograma relacionado: al ingresar hematíes, hemoglobina o hematocrito, la
+  captura completa los otros dos mediante `Hto = Hb × 3`, `Hb = Hto / 3` y
+  `hematíes = Hb / 3`; cualquier edición posterior recalcula la misma tanda.
+- Orden canónico: captura, almacenamiento e impresión respetan el orden clínico
+  versionado del catálogo y nunca ordenan los análisis alfabéticamente.
 - Evolución: nunca mezcla silenciosamente unidades o métodos incompatibles.
 - Sin diagnósticos automáticos.
 
@@ -35,6 +45,8 @@ El responsable legal debe aprobar privacidad, retención, contratos de encargado
 - Restauración real desde backup.
 - Piloto offline con corte real de red, reinicio, cola idempotente y conflicto
   concurrente entre dos equipos.
+- Verificación de que no se pueda registrar sin analista, usar uno inactivo ni
+  desactivar al último analista disponible.
 - Aprobación escrita del almacenamiento cifrado local, vigencia de 72 horas y
   procedimiento para equipos perdidos o revocados.
 

@@ -19,13 +19,11 @@ export async function requireActiveOfflineUser() {
   const supabase = await createClient();
   const { data: { user }, error } = await supabase.auth.getUser();
   if (error || !user) throw new OfflineApiError(401, "Sesión requerida.");
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("full_name,role,active")
-    .eq("id", user.id)
-    .maybeSingle();
-  if (profileError || !profile?.active) throw new OfflineApiError(403, "Usuario inactivo o sin perfil.");
-  return { supabase, user, profile };
+  const account = {
+    fullName: String(user.user_metadata.full_name ?? user.email?.split("@")[0] ?? "Laboratorio José"),
+    role: "owner",
+  };
+  return { supabase, user, account };
 }
 
 export function offlineApiResponse(error: unknown) {

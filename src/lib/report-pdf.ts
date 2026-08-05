@@ -2,6 +2,8 @@ import {
   appendBezierCurve, closePath, lineTo, moveTo, PDFDocument, PDFFont, PDFImage, PDFPage,
   popGraphicsState, pushGraphicsState, setLineWidth, setStrokingColor, StandardFonts, stroke, rgb,
 } from "pdf-lib";
+import { canonicalAnalysisOrder, canonicalGroupOrder } from "@/lib/catalog-order";
+import { expandMillonesText, formatNumericResult } from "@/lib/clinical";
 
 const LETTER: [number, number] = [612, 792];
 const MARGIN = 42;
@@ -9,6 +11,8 @@ const CONTENT_WIDTH = LETTER[0] - MARGIN * 2;
 const INK = rgb(0.08, 0.16, 0.25);
 const MUTED = rgb(0.37, 0.43, 0.48);
 const CRITICAL = rgb(0.70, 0.14, 0.17);
+const TABLE_HEADER = rgb(0.84, 0.84, 0.84);
+const TABLE_COLUMNS = [MARGIN, MARGIN + 235, MARGIN + 385, MARGIN + CONTENT_WIDTH] as const;
 
 export type LabReportResult = {
   group: string;
@@ -17,6 +21,8 @@ export type LabReportResult = {
   unit: string;
   reference: string;
   flag: string;
+  groupOrder?: number;
+  analysisOrder?: number;
 };
 
 export type LabReportData = {
@@ -28,8 +34,7 @@ export type LabReportData = {
   sex: string;
   age: string;
   revision: number;
-  printedBy: string;
-  footer: string;
+  printedAt: string;
   results: LabReportResult[];
 };
 
@@ -99,22 +104,48 @@ function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, b
   });
 }
 
-function drawTableHeader(page: PDFPage, bold: PDFFont, y: number) {
-  const headers = [
-    ["EXÁMENES SOLICITADOS", MARGIN, 224],
-    ["RESULTADOS", 290, 82],
-    ["UNID", 402, 45],
-    ["V. NORMALES", 468, 102],
-  ] as const;
-  headers.forEach(([label, x, width]) => {
-    page.drawText(clean(label), { x, y, size: 8, font: bold, color: INK });
-    page.drawLine({ start: { x, y: y - 3 }, end: { x: x + Math.min(width, bold.widthOfTextAtSize(clean(label), 8)), y: y - 3 }, thickness: 0.7, color: INK });
+function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: number) {
+  const titleHeight = 24;
+  const columnHeight = 22;
+  const bottom = top - titleHeight - columnHeight;
+  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: columnHeight, color: TABLE_HEADER });
+  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: titleHeight + columnHeight, borderColor: INK, borderWidth: 0.8 });
+  page.drawLine({ start: { x: MARGIN, y: top - titleHeight }, end: { x: MARGIN + CONTENT_WIDTH, y: top - titleHeight }, thickness: 0.8, color: INK });
+  TABLE_COLUMNS.slice(1, -1).forEach((x) => page.drawLine({
+    start: { x, y: bottom }, end: { x, y: top - titleHeight }, thickness: 0.8, color: INK,
+  }));
+
+  const title = clean(group).toUpperCase();
+  page.drawText(title, {
+    x: MARGIN + (CONTENT_WIDTH - bold.widthOfTextAtSize(title, 10)) / 2,
+    y: top - 16,
+    size: 10,
+    font: bold,
+    color: INK,
   });
+  const headers = ["ANALISIS", "RESULTADOS", "VALORES REFERENCIA"];
+  headers.forEach((label, index) => {
+    const left = TABLE_COLUMNS[index];
+    const width = TABLE_COLUMNS[index + 1] - left;
+    page.drawText(clean(label), {
+      x: left + (width - bold.widthOfTextAtSize(clean(label), 8)) / 2,
+      y: bottom + 7,
+      size: 8,
+      font: bold,
+      color: INK,
+    });
+  });
+  return bottom - 15;
 }
 
 function groupResults(results: LabReportResult[]) {
   const grouped = new Map<string, LabReportResult[]>();
-  results.forEach((result) => grouped.set(result.group, [...(grouped.get(result.group) ?? []), result]));
+  [...results].sort((left, right) =>
+    (left.groupOrder ?? canonicalGroupOrder(left.group)) - (right.groupOrder ?? canonicalGroupOrder(right.group))
+    || (left.analysisOrder ?? canonicalAnalysisOrder(left.group, left.analysis))
+      - (right.analysisOrder ?? canonicalAnalysisOrder(right.group, right.analysis))
+    || left.analysis.localeCompare(right.analysis, "es"))
+    .forEach((result) => grouped.set(result.group, [...(grouped.get(result.group) ?? []), result]));
   return grouped;
 }
 
@@ -136,16 +167,11 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
     return 792 - MARGIN - height - 8;
   }
 
-  function addPage(group: string, continuation = false) {
+  function addPage(group: string, _continuation = false) {
     page = pdf.addPage(LETTER);
     const cardTop = drawLogo(page, logo);
     drawPatientCard(page, data, regular, bold, cardTop);
-    y = cardTop - 91;
-    const title = `SECCIÓN: ${clean(group).toUpperCase()}${continuation ? " (CONTINUACIÓN)" : ""}`;
-    page.drawText(title, { x: MARGIN, y, size: 10.5, font: bold, color: INK });
-    y -= 28;
-    drawTableHeader(page, bold, y);
-    y -= 24;
+    y = drawTableHeader(page, bold, group, cardTop - 84);
   }
 
   for (const [group, results] of groupResults(data.results)) {
@@ -153,26 +179,28 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
     addPage(group);
     for (const result of results) {
       const analysisLines = splitText(result.analysis, regular, 8.5, 224);
-      const referenceLines = splitText(result.reference || "-", regular, 8, 102);
-      const lineCount = Math.max(1, analysisLines.length, referenceLines.length);
+      const resultWithUnit = [formatNumericResult(result.value, result.unit) || "-", expandMillonesText(result.unit)].filter(Boolean).join(" ");
+      const resultLines = splitText(resultWithUnit, regular, 8.5, 138);
+      const referenceLines = splitText(result.reference || "-", regular, 8, 131);
+      const lineCount = Math.max(1, analysisLines.length, resultLines.length, referenceLines.length);
       const rowHeight = Math.max(18, lineCount * 10 + 5);
       if (y - rowHeight < 58) addPage(group, true);
 
-      drawLines(page!, analysisLines, MARGIN, y, regular, 8.5);
-      const flagged = result.flag === "critical" || result.flag === "high" || result.flag === "low";
-      drawLines(page!, splitText(result.value || "-", flagged ? bold : regular, 9, 82), 290, y, flagged ? bold : regular, 9, result.flag === "critical" ? CRITICAL : INK);
-      drawLines(page!, splitText(result.unit || "-", regular, 8, 45), 402, y, regular, 8);
-      drawLines(page!, referenceLines, 468, y, regular, 8);
+      drawLines(page!, analysisLines, MARGIN + 3, y, bold, 8.5);
+      drawLines(page!, resultLines, TABLE_COLUMNS[1] + 3, y, bold, 8.5, result.flag === "critical" ? CRITICAL : INK);
+      drawLines(page!, referenceLines, TABLE_COLUMNS[2] + 3, y, regular, 8);
       y -= rowHeight;
     }
   }
 
   if (!currentGroup) addPage("RESULTADOS");
 
-  const footer = clean(data.footer || "Resultados para evaluación por el profesional tratante.");
+  const printed = new Intl.DateTimeFormat("es-PE", {
+    dateStyle: "short", timeStyle: "short", timeZone: "America/Lima",
+  }).format(new Date(data.printedAt));
   pdf.getPages().forEach((outputPage, index) => {
-    outputPage.drawText(footer, { x: MARGIN, y: 31, size: 7, font: regular, color: MUTED, maxWidth: 300 });
-    outputPage.drawText(`Impreso por: ${clean(data.printedBy)} · Rev. ${data.revision}`, { x: 355, y: 31, size: 7, font: regular, color: MUTED, maxWidth: 175 });
+    outputPage.drawText(`Impreso el ${clean(printed)}`, { x: MARGIN, y: 31, size: 7, font: regular, color: MUTED, maxWidth: 300 });
+    outputPage.drawText(`Rev. ${data.revision}`, { x: 455, y: 31, size: 7, font: regular, color: MUTED, maxWidth: 70 });
     outputPage.drawText(`${index + 1}/${pdf.getPageCount()}`, { x: 548, y: 31, size: 7, font: regular, color: MUTED });
   });
 

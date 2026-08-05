@@ -1,4 +1,5 @@
 import type { AnalysisDefinition } from "@/lib/types";
+import { canonicalAnalysisOrder, canonicalGroupOrder } from "@/lib/catalog-order";
 
 type GroupPreset = {
   group: string;
@@ -156,8 +157,9 @@ function normalizeText(value: string) {
 }
 
 function compareAnalyses(left: PickerAnalysis, right: PickerAnalysis) {
-  if (left.common !== right.common) return left.common ? -1 : 1;
-  if (left.pickerOrder !== right.pickerOrder) return left.pickerOrder - right.pickerOrder;
+  const leftOrder = left.pickerOrder === 999 ? canonicalAnalysisOrder(left.group, left.name) : left.pickerOrder;
+  const rightOrder = right.pickerOrder === 999 ? canonicalAnalysisOrder(right.group, right.name) : right.pickerOrder;
+  if (leftOrder !== rightOrder) return leftOrder - rightOrder;
   return left.name.localeCompare(right.name, "es");
 }
 
@@ -219,7 +221,9 @@ export function buildPickerGroups(analyses: AnalysisDefinition[]) {
     .sort((left, right) => {
       const leftPreset = getPreset(left.group);
       const rightPreset = getPreset(right.group);
-      return (leftPreset?.order ?? 999) - (rightPreset?.order ?? 999) || left.group.localeCompare(right.group, "es");
+      return (leftPreset?.order ?? canonicalGroupOrder(left.group))
+        - (rightPreset?.order ?? canonicalGroupOrder(right.group))
+        || left.group.localeCompare(right.group, "es");
     });
 }
 

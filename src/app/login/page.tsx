@@ -54,7 +54,7 @@ export default function LoginPage() {
           <div>
             <p className="eyebrow">Bienvenido</p>
             <h2>Iniciar sesion</h2>
-            <p className="muted">Ingresa con la cuenta asignada por el laboratorio.</p>
+            <p className="muted">Ingresa con la cuenta compartida autorizada del laboratorio.</p>
           </div>
           <label>Correo electronico
             <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="nombre@laboratorio.pe" required />

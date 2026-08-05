@@ -15,8 +15,7 @@ describe("buildLabReportPdf", () => {
       sex: "Femenino",
       age: "34 años",
       revision: 1,
-      printedBy: "Tecnólogo responsable",
-      footer: "Resultados para evaluación por el profesional tratante.",
+      printedAt: "2026-08-01T10:35:00-05:00",
       results: Array.from({ length: 42 }, (_, index) => ({
         group: "Bioquímica",
         analysis: `Examen solicitado ${index + 1}`,

@@ -3,6 +3,7 @@
 import { createContext, useContext, type ReactNode } from "react";
 import { buildLabReportPdf } from "@/lib/report-pdf";
 import { formatPatientAgeAt } from "@/lib/clinical";
+import { patientIdFromDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/client";
 import {
   commitOfflineMutation,
@@ -16,7 +17,7 @@ import {
   type LocalRegistrationEntry,
 } from "@/lib/offline/materialize";
 import type { OfflineOperation, OfflineVaultSnapshot } from "@/lib/offline/types";
-import type { LabData, LabOrder, Patient, ResultValue } from "@/lib/types";
+import type { Analyst, LabData, LabOrder, Patient, ResultValue } from "@/lib/types";
 
 type CurrentUser = { id: string; fullName: string; role: string };
 
@@ -26,20 +27,19 @@ export type OfflineRepository = {
   savePatient(input: {
     documentNumber: string;
     fullName: string;
-    birthAt?: string;
+    birthDate?: string;
     sex?: Patient["sex"];
-    phone?: string;
   }): Promise<Patient>;
   updatePatient(input: {
     patient: Patient;
     fullName: string;
-    birthAt: string;
+    birthDate: string;
     sex: Patient["sex"];
-    phone?: string;
   }): Promise<Patient>;
   registerAnalyses(input: {
     patient: Patient;
     occurredAt: string;
+    analyst: Analyst;
     entries: LocalRegistrationEntry[];
   }): Promise<string>;
   saveResults(order: LabOrder, results: ResultValue[]): Promise<{ lockVersion: number; results: ResultValue[] }>;
@@ -91,11 +91,11 @@ export function OfflineRepositoryProvider(props: {
     online: props.online,
     async savePatient(input) {
       if (!props.session) {
-        const response = input.birthAt && input.sex
+        const response = input.birthDate && input.sex
           ? await createClient().rpc("upsert_patient_with_demographics", {
               patient_dni: input.documentNumber,
               patient_name: input.fullName,
-              patient_birth_at: input.birthAt,
+              patient_birth_date: input.birthDate,
               patient_sex: input.sex,
             })
           : await createClient().rpc("upsert_simple_patient", {
@@ -104,39 +104,35 @@ export function OfflineRepositoryProvider(props: {
             });
         if (response.error) throw response.error;
         await props.refresh();
-        const row = response.data as { id: string; document_number?: string; full_name?: string; birth_at?: string; birth_date?: string; sex?: Patient["sex"]; phone?: string; sync_version?: number };
+        const row = response.data as { id: number; full_name?: string; birth_date?: string; sex?: Patient["sex"]; sync_version?: number };
         return {
           id: row.id,
-          documentNumber: row.document_number ?? input.documentNumber,
+          documentNumber: input.documentNumber,
           fullName: row.full_name ?? input.fullName,
-          birthAt: row.birth_at ?? input.birthAt ?? "",
-          birthDate: row.birth_date ?? input.birthAt?.slice(0, 10) ?? "",
+          birthDate: row.birth_date ?? input.birthDate ?? "",
           sex: row.sex ?? input.sex ?? "U",
-          phone: row.phone ?? input.phone,
           syncVersion: row.sync_version ?? 1,
         };
       }
-      const existing = props.data.patients.find((patient) => patient.documentNumber === input.documentNumber);
+      const patientId = patientIdFromDni(input.documentNumber);
+      if (patientId === null) throw new Error("invalid_dni");
+      const existing = props.data.patients.find((patient) => patient.id === patientId);
       const operation = operationBase(props.session, props.currentUser, "patient.upsert");
       const patient: Patient = {
-        id: existing?.id ?? crypto.randomUUID(),
+        id: patientId,
         documentNumber: input.documentNumber,
         fullName: input.fullName,
-        birthAt: input.birthAt ?? existing?.birthAt ?? "",
-        birthDate: input.birthAt?.slice(0, 10) ?? existing?.birthDate ?? "",
+        birthDate: input.birthDate ?? existing?.birthDate ?? "",
         sex: input.sex ?? existing?.sex ?? "U",
-        phone: input.phone ?? existing?.phone,
         syncVersion: existing?.syncVersion ?? 1,
         syncState: "pending",
         clientMutationId: operation.clientMutationId,
       };
       operation.payload = {
-        localId: patient.id,
-        documentNumber: patient.documentNumber,
+        patientId: patient.id,
         fullName: patient.fullName,
-        birthAt: patient.birthAt || null,
+        birthDate: patient.birthDate || null,
         sex: patient.sex === "U" ? null : patient.sex,
-        phone: patient.phone ?? null,
       };
       await commit(materializePatient(props.data, patient), operation);
       return patient;
@@ -146,30 +142,26 @@ export function OfflineRepositoryProvider(props: {
         const response = await createClient().rpc("update_patient_details", {
           target_patient: input.patient.id,
           patient_name: input.fullName,
-          patient_birth_at: input.birthAt,
+          patient_birth_date: input.birthDate,
           patient_sex: input.sex,
-          patient_phone: input.phone ?? null,
         });
         if (response.error) throw response.error;
         await props.refresh();
-        return { ...input.patient, fullName: input.fullName, birthAt: input.birthAt, birthDate: input.birthAt.slice(0, 10), sex: input.sex, phone: input.phone };
+        return { ...input.patient, fullName: input.fullName, birthDate: input.birthDate, sex: input.sex };
       }
       const operation = operationBase(props.session, props.currentUser, "patient.update");
       operation.baseVersion = input.patient.syncVersion ?? 1;
       operation.payload = {
         patientId: input.patient.id,
         fullName: input.fullName,
-        birthAt: input.birthAt,
+        birthDate: input.birthDate,
         sex: input.sex,
-        phone: input.phone ?? null,
       };
       const patient: Patient = {
         ...input.patient,
         fullName: input.fullName,
-        birthAt: input.birthAt,
-        birthDate: input.birthAt.slice(0, 10),
+        birthDate: input.birthDate,
         sex: input.sex,
-        phone: input.phone,
         syncState: "pending",
         clientMutationId: operation.clientMutationId,
       };
@@ -177,12 +169,15 @@ export function OfflineRepositoryProvider(props: {
       return patient;
     },
     async registerAnalyses(input) {
+      const entries = input.entries.filter(({ value }) => value.trim().length > 0);
+      if (!entries.length) throw new Error("analyses_required");
       if (!props.session) {
         const response = await createClient().rpc("register_daily_analyses", {
           target_patient: input.patient.id,
           occurred_at: input.occurredAt,
-          result_entries: input.entries.map(({ analysis, value }) => ({
+          result_entries: entries.map(({ analysis, value }) => ({
             analysis_version_id: analysis.versionId,
+            analyst_id: input.analyst.id,
             payload: analysis.resultType === "numeric"
               ? { numeric_value: Number(value) }
               : analysis.resultType === "qualitative"
@@ -197,10 +192,11 @@ export function OfflineRepositoryProvider(props: {
       const operation = operationBase(props.session, props.currentUser, "analysis.register");
       if (input.patient.clientMutationId) operation.dependencies = [input.patient.clientMutationId];
       operation.payload = {
-        patientDocumentNumber: input.patient.documentNumber,
+        patientId: input.patient.id,
         occurredAt: input.occurredAt,
-        resultEntries: input.entries.map(({ analysis, value }) => ({
+        resultEntries: entries.map(({ analysis, value }) => ({
           analysis_version_id: analysis.versionId,
+          analyst_id: input.analyst.id,
           payload: analysis.resultType === "numeric"
             ? { numeric_value: Number(value) }
             : analysis.resultType === "qualitative"
@@ -212,7 +208,8 @@ export function OfflineRepositoryProvider(props: {
         data: props.data,
         patient: input.patient,
         occurredAt: input.occurredAt,
-        entries: input.entries,
+        entries,
+        analyst: input.analyst,
         mutationId: operation.clientMutationId,
         actorName: props.currentUser.fullName,
       });
@@ -290,10 +287,9 @@ export function OfflineRepositoryProvider(props: {
         patientName: order.patientName,
         documentNumber: order.documentNumber,
         sex: ({ F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as const)[order.patientSex],
-        age: formatPatientAgeAt(order.patientBirthAt, order.createdAt),
+        age: formatPatientAgeAt(order.patientBirthDate, order.createdAt),
         revision: order.revisionNumber ?? 1,
-        printedBy: props.currentUser.fullName,
-        footer: props.data.reportSettings?.footer ?? "Resultados para evaluación por el profesional tratante.",
+        printedAt: new Date().toISOString(),
         results: results.map((result) => ({
           group: result.group,
           analysis: result.analyte,

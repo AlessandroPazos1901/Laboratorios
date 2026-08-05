@@ -3,6 +3,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { formatPatientAgeAt } from "@/lib/clinical";
 import { buildLabReportPdf, type LabReportResult } from "@/lib/report-pdf";
+import { formatDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -44,22 +45,17 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     selectedResult,
     groupsResult,
     analysesResult,
-    settingsResult,
-    profileResult,
   ] = await Promise.all([
-    supabase.from("patients").select("full_name,document_number,birth_date,birth_at,sex").eq("id", order.patient_id).single(),
+    supabase.from("patients").select("id,full_name,birth_date,sex").eq("id", order.patient_id).single(),
     supabase.from("result_revisions").select("id,revision").eq("order_id", order.id).order("revision", { ascending: false }).limit(1).single(),
-    supabase.from("order_analyses").select("id,analysis_id,analysis_version_id,batch_id,display_order").eq("order_id", order.id).order("display_order"),
+    supabase.from("order_analyses").select("id,analysis_id,analysis_version_id,batch_id,analyst_id,display_order").eq("order_id", order.id).order("display_order"),
     supabase.from("analysis_groups").select("id,name,display_order"),
-    supabase.from("analyses").select("id,name,group_id"),
-    supabase.from("lab_settings").select("trade_name,report_footer").eq("id", true).maybeSingle(),
-    supabase.from("profiles").select("full_name").eq("id", user.id).maybeSingle(),
+    supabase.from("analyses").select("id,name,group_id,source_metadata"),
   ]);
 
   if (
     patientResult.error || revisionResult.error || selectedResult.error
-    || groupsResult.error || analysesResult.error || settingsResult.error
-    || profileResult.error
+    || groupsResult.error || analysesResult.error
   ) {
     return NextResponse.json({ error: "No se pudieron cargar los datos para impresión." }, { status: 500 });
   }
@@ -95,6 +91,8 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
         ? "Histórico · no evaluado"
         : String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? ""),
       flag: snapshot.historical_unreviewed === true ? "unreviewed" : value.flag,
+      groupOrder: groupById.get(analysis.group_id)?.display_order ?? 999,
+      analysisOrder: Number((analysis.source_metadata as Record<string, unknown> | null)?.picker_order ?? 999),
     }];
   });
 
@@ -118,12 +116,11 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     orderNumber: order.order_number,
     orderedAt: order.ordered_at,
     patientName: patientResult.data.full_name,
-    documentNumber: patientResult.data.document_number,
+    documentNumber: formatDni(patientResult.data.id),
     sex: ({ F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as Record<string, string>)[patientResult.data.sex ?? "U"] ?? "No registrado",
-    age: formatPatientAgeAt(patientResult.data.birth_at ?? patientResult.data.birth_date ?? "", order.ordered_at),
+    age: formatPatientAgeAt(patientResult.data.birth_date ?? "", order.ordered_at),
     revision: revision.revision,
-    printedBy: profileResult.data?.full_name ?? "Usuario del laboratorio",
-    footer: settingsResult.data?.report_footer || "Resultados para evaluación por el profesional tratante.",
+    printedAt: new Date().toISOString(),
     results: printable,
   }, logoBytes);
   return new NextResponse(Buffer.from(bytes), {

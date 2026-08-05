@@ -14,22 +14,7 @@ export default async function ApplicationPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("full_name,role,active")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (!profile?.active) {
-    return <main className="setup-required">
-      <section className="panel">
-        <p className="eyebrow">Configuracion pendiente</p>
-        <h1>El usuario aun no tiene un perfil activo</h1>
-        <p>Ejecuta la migracion <span className="mono">202607240004_auth_profile_bootstrap.sql</span> y vuelve a iniciar sesion.</p>
-      </section>
-    </main>;
-  }
-
   const data = await loadLabData(supabase);
-  return <LabApp data={data} currentUser={{ fullName: profile.full_name, role: profile.role }} />;
+  const fullName = String(user.user_metadata.full_name ?? user.email?.split("@")[0] ?? "Laboratorio José");
+  return <LabApp data={data} currentUser={{ fullName, role: "owner" }} />;
 }

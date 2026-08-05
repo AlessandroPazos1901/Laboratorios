@@ -2,10 +2,11 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isMissingBatchSchema } from "@/lib/clinical";
-import type { AnalysisDefinition, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
+import { formatDni } from "@/lib/patients";
+import type { AnalysisDefinition, Analyst, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
 
-type PatientRow = { id: string; document_number: string; full_name: string; birth_date: string | null; birth_at: string | null; sex: Patient["sex"] | null; phone: string | null; sync_version?: number };
-type OrderRow = { id: string; order_number: number; patient_id: string; ordered_at: string; created_by: string; lock_version: number };
+type PatientRow = { id: number; full_name: string; birth_date: string | null; sex: Patient["sex"] | null; sync_version?: number };
+type OrderRow = { id: string; order_number: number; patient_id: number; ordered_at: string; lock_version: number };
 type GroupRow = { id: string; name: string };
 type AnalysisRow = {
   id: string;
@@ -31,11 +32,11 @@ type VersionRow = {
   effective_to: string | null;
   clinical_status: "approved" | "historical_unreviewed";
 };
-type OrderAnalysisRow = { id: string; order_id: string; analysis_id: string; analysis_version_id: string; batch_id: string | null; performed_by: string | null; display_order: number; created_at: string };
+type OrderAnalysisRow = { id: string; order_id: string; analysis_id: string; analysis_version_id: string; batch_id: string | null; performed_by: string | null; analyst_id: string | null; display_order: number; created_at: string };
 type AnalysisBatchRow = { id: string; order_id: string; group_id: string; registered_at: string };
 type RevisionRow = { id: string; order_id: string; revision: number };
 type ResultRow = { id: string; revision_id: string; order_analysis_id: string; numeric_value: number | null; text_value: string | null; qualitative_value: string | null; flag: Exclude<ResultFlag, "unreviewed">; clinical_snapshot: Record<string, unknown> };
-type ProfileRow = { id: string; full_name: string };
+type AnalystRow = { id: string; full_name: string; active: boolean };
 type SettingsRow = { trade_name: string | null; report_footer: string | null };
 
 const allowedFlags = new Set<Exclude<ResultFlag, "unreviewed">>(["normal", "low", "high", "critical"]);
@@ -64,12 +65,10 @@ export async function loadLabData(
   supabase: SupabaseClient,
   options: { offlineWindowDays?: number } = {},
 ): Promise<LabData> {
-  const patientColumns = options.offlineWindowDays
-    ? "id,document_number,full_name,birth_date,birth_at,sex,phone,sync_version"
-    : "id,document_number,full_name,birth_date,birth_at,sex,phone";
+  const patientColumns = "id,full_name,birth_date,sex,sync_version";
   let ordersQuery = supabase
     .from("orders")
-    .select("id,order_number,patient_id,ordered_at,created_by,lock_version")
+    .select("id,order_number,patient_id,ordered_at,lock_version")
     .neq("status", "cancelled")
     .order("ordered_at", { ascending: false });
   if (options.offlineWindowDays) {
@@ -80,18 +79,18 @@ export async function loadLabData(
   }
   const [
     patientsResult, ordersResult, groupsResult, analysesResult, versionsResult,
-    orderAnalysesResult, analysisBatchesResult, revisionsResult, resultsResult, profilesResult, settingsResult,
+    orderAnalysesResult, analysisBatchesResult, revisionsResult, resultsResult, analystsResult, settingsResult,
   ] = await Promise.all([
-    supabase.from("patients").select(patientColumns).is("archived_at", null),
+    supabase.from("patients").select(patientColumns),
     ordersQuery,
     supabase.from("analysis_groups").select("id,name"),
     supabase.from("analyses").select("id,code,group_id,name,result_type,active,source_metadata"),
     supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,critical_limits,effective_from,effective_to,clinical_status").order("version", { ascending: false }),
-    supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id,batch_id,performed_by,display_order,created_at").order("display_order"),
+    supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id,batch_id,performed_by,analyst_id,display_order,created_at").order("display_order"),
     supabase.from("order_analysis_batches").select("id,order_id,group_id,registered_at").order("registered_at", { ascending: false }),
     supabase.from("result_revisions").select("id,order_id,revision").order("revision", { ascending: false }),
     supabase.from("result_values").select("id,revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot"),
-    supabase.from("profiles").select("id,full_name"),
+    supabase.from("analysts").select("id,full_name,active").order("full_name"),
     supabase.from("lab_settings").select("trade_name,report_footer").eq("id", true).maybeSingle(),
   ]);
 
@@ -104,20 +103,21 @@ export async function loadLabData(
   const analysisBatchRows = (analysisBatchesResult.data ?? []) as AnalysisBatchRow[];
   const revisionRows = (revisionsResult.data ?? []) as RevisionRow[];
   const resultRows = (resultsResult.data ?? []) as ResultRow[];
-  const profileRows = (profilesResult.data ?? []) as ProfileRow[];
+  const analystRows = (analystsResult.data ?? []) as AnalystRow[];
   const settings = settingsResult.data as SettingsRow | null;
 
   if (orderAnalysesResult.error) {
     const missingPerformer = orderAnalysesResult.error.code === "42703"
       || orderAnalysesResult.error.code === "PGRST204"
-      || orderAnalysesResult.error.message.includes("performed_by");
+      || orderAnalysesResult.error.message.includes("performed_by")
+      || orderAnalysesResult.error.message.includes("analyst_id");
     if (missingPerformer) {
       const currentSchemaResult = await supabase
         .from("order_analyses")
         .select("id,order_id,analysis_id,analysis_version_id,batch_id,display_order,created_at")
         .order("display_order");
       if (!currentSchemaResult.error) {
-        orderAnalysisRows = (currentSchemaResult.data ?? []).map((row) => ({ ...row, performed_by: null })) as OrderAnalysisRow[];
+        orderAnalysisRows = (currentSchemaResult.data ?? []).map((row) => ({ ...row, performed_by: null, analyst_id: null })) as OrderAnalysisRow[];
       } else if (!isMissingBatchSchema(currentSchemaResult.error)) {
         throw currentSchemaResult.error;
       } else {
@@ -126,7 +126,7 @@ export async function loadLabData(
           .select("id,order_id,analysis_id,analysis_version_id,display_order,created_at")
           .order("display_order");
         if (legacyResult.error) throw legacyResult.error;
-        orderAnalysisRows = (legacyResult.data ?? []).map((row) => ({ ...row, batch_id: null, performed_by: null })) as OrderAnalysisRow[];
+        orderAnalysisRows = (legacyResult.data ?? []).map((row) => ({ ...row, batch_id: null, performed_by: null, analyst_id: null })) as OrderAnalysisRow[];
       }
     } else if (isMissingBatchSchema(orderAnalysesResult.error)) {
       const legacyResult = await supabase
@@ -134,7 +134,7 @@ export async function loadLabData(
         .select("id,order_id,analysis_id,analysis_version_id,display_order,created_at")
         .order("display_order");
       if (legacyResult.error) throw legacyResult.error;
-      orderAnalysisRows = (legacyResult.data ?? []).map((row) => ({ ...row, batch_id: null, performed_by: null })) as OrderAnalysisRow[];
+      orderAnalysisRows = (legacyResult.data ?? []).map((row) => ({ ...row, batch_id: null, performed_by: null, analyst_id: null })) as OrderAnalysisRow[];
     } else {
       throw orderAnalysesResult.error;
     }
@@ -144,7 +144,7 @@ export async function loadLabData(
   const analysesById = new Map(analysisRows.map((row) => [row.id, row]));
   const versionsById = new Map(versionRows.map((row) => [row.id, row]));
   const patientsById = new Map(patientRows.map((row) => [row.id, row]));
-  const profilesById = new Map(profileRows.map((row) => [row.id, row.full_name]));
+  const analystsById = new Map(analystRows.map((row) => [row.id, row.full_name]));
   const batchesById = new Map(analysisBatchRows.map((row) => [row.id, row]));
   const latestRevisionByOrder = new Map<string, RevisionRow>();
   revisionRows.forEach((row) => { if (!latestRevisionByOrder.has(row.order_id)) latestRevisionByOrder.set(row.order_id, row); });
@@ -155,12 +155,10 @@ export async function loadLabData(
 
   const patients: Patient[] = patientRows.map((row) => ({
     id: row.id,
-    documentNumber: row.document_number,
+    documentNumber: formatDni(row.id),
     fullName: row.full_name,
     birthDate: row.birth_date ?? "",
-    birthAt: row.birth_at ?? (row.birth_date ? `${row.birth_date}T00:00:00` : ""),
     sex: row.sex ?? "U",
-    phone: row.phone ?? undefined,
     syncVersion: row.sync_version ?? 1,
   }));
 
@@ -189,6 +187,7 @@ export async function loadLabData(
         batchId: item.batch_id ?? `legacy:${item.order_id}:${analysis.group_id}`,
         registeredAt: (item.batch_id ? batchesById.get(item.batch_id)?.registered_at : null) ?? item.created_at,
         analyte: String(snapshot.analysis_name ?? analysis?.name ?? "Análisis"),
+        analysisCode: analysis.code,
         group: groupsById.get(analysis?.group_id ?? "") ?? "Sin grupo",
         resultType: analysis.result_type,
         value: String(value),
@@ -201,7 +200,8 @@ export async function loadLabData(
         method: isHistoricalUnreviewed
           ? "Importado del Excel"
           : String(snapshot.method ?? version?.method ?? ""),
-        performedBy: profilesById.get(item.performed_by ?? row.created_by) ?? "Usuario no disponible",
+        analystId: item.analyst_id ?? undefined,
+        performedBy: analystsById.get(item.analyst_id ?? "") ?? "Analista no disponible",
         qualitativeOptions: Array.isArray(version?.qualitative_options)
           ? version.qualitative_options.filter((option): option is string => typeof option === "string")
           : undefined,
@@ -215,13 +215,12 @@ export async function loadLabData(
       code: `ORD-${new Date(row.ordered_at).getFullYear()}-${String(row.order_number).padStart(5, "0")}`,
       patientId: row.patient_id,
       patientName: patient?.full_name ?? "Paciente no disponible",
-      documentNumber: patient?.document_number ?? "",
-      patientBirthAt: patient?.birth_at ?? (patient?.birth_date ? `${patient.birth_date}T00:00:00` : ""),
+      documentNumber: patient ? formatDni(patient.id) : "",
+      patientBirthDate: patient?.birth_date ?? "",
       patientSex: patient?.sex ?? "U",
-      patientPhone: patient?.phone ?? undefined,
       createdAt: row.ordered_at,
       groups,
-      responsible: profilesById.get(row.created_by) ?? "Sin asignar",
+      responsible: [...new Set(results.map((result) => result.performedBy))].join(", ") || "Sin asignar",
       results,
     };
   });
@@ -252,6 +251,12 @@ export async function loadLabData(
     };
   });
 
+  const analysts: Analyst[] = analystRows.map((row) => ({
+    id: row.id,
+    fullName: row.full_name,
+    active: row.active,
+  }));
+
   const summary = {
     orders: orders.length,
     analyses: orderAnalysisRows.length,
@@ -263,6 +268,7 @@ export async function loadLabData(
     patients,
     orders,
     analyses,
+    analysts,
     trend: [],
     summary,
     reportSettings: {

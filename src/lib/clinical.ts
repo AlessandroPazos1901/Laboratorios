@@ -39,6 +39,7 @@ export function calculateAgeAt(birthDate: string, atDate: string) {
 
 export function formatPatientAgeAt(birthAt: string, occurredAt: string) {
   if (!birthAt) return "No registrada";
+  const hasBirthTime = birthAt.includes("T");
   const birth = new Date(birthAt.includes("T") ? birthAt : `${birthAt}T00:00:00`);
   const occurred = new Date(occurredAt.includes("T") ? occurredAt : `${occurredAt}T00:00:00`);
   const elapsed = occurred.getTime() - birth.getTime();
@@ -48,6 +49,7 @@ export function formatPatientAgeAt(birthAt: string, occurredAt: string) {
   const day = 24 * hour;
   const days = Math.floor(elapsed / day);
   if (days < 28) {
+    if (!hasBirthTime) return `${days} ${days === 1 ? "día" : "días"}`;
     const hours = Math.floor((elapsed % day) / hour);
     return `${days} ${days === 1 ? "día" : "días"} ${hours} ${hours === 1 ? "hora" : "horas"}`;
   }
@@ -83,10 +85,51 @@ export function flagNumericResult(
   return "normal";
 }
 
+const isMillonesUnit = (unit: string) => /mill/i.test(unit);
+
+export function formatNumericResult(rawValue: string, unit = "") {
+  const trimmed = rawValue.trim();
+  const number = Number(trimmed);
+  if (!trimmed || !Number.isFinite(number)) return rawValue;
+  if (isMillonesUnit(unit)) return (number * 1_000_000).toLocaleString("es-PE");
+  const decimals = trimmed.includes(".") ? trimmed.split(".")[1].length : 0;
+  return number.toLocaleString("es-PE", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+// Un análisis "en millones" (ej. HEMATIES, 4.0-5.9 millones/µL) se captura como el valor corto
+// (3.78) pero se muestra expandido (3,780,000); esto reescala el texto de unidad/referencia acorde.
+export function expandMillonesText(text: string) {
+  if (!isMillonesUnit(text)) return text;
+  return text
+    .replace(/\d+(?:[.,]\d+)?/g, (match) => (Number(match.replace(",", ".")) * 1_000_000).toLocaleString("es-PE"))
+    .replace(/millones\s*/gi, "")
+    .trim();
+}
+
 export function normalizeDocument(value: string) {
   return value.replace(/\D/g, "").slice(0, 12);
 }
 
 export function isValidDni(value: string) {
   return /^\d{8}$/.test(normalizeDocument(value));
+}
+
+const linkedHematologyCodes = new Set(["HEM-RBC", "HEM-HB", "HEM-HCT"]);
+
+function conciseDecimal(value: number) {
+  return Number(value.toFixed(2)).toString();
+}
+
+export function linkedHematologyValues(sourceCode: string, rawValue: string) {
+  if (!linkedHematologyCodes.has(sourceCode) || !rawValue.trim()) return null;
+  const source = Number(rawValue);
+  if (!Number.isFinite(source)) return null;
+  const hemoglobin = sourceCode === "HEM-HB" ? source
+    : sourceCode === "HEM-HCT" ? source / 3
+      : source * 3;
+  return {
+    "HEM-RBC": conciseDecimal(hemoglobin / 3),
+    "HEM-HB": conciseDecimal(hemoglobin),
+    "HEM-HCT": conciseDecimal(hemoglobin * 3),
+  };
 }

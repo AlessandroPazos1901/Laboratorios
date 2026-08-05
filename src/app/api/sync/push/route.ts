@@ -38,13 +38,19 @@ export async function POST(request: Request) {
         });
         continue;
       }
-      const { data, error } = await supabase.rpc("apply_offline_operation", {
-        target_device: input.deviceId,
-        target_mutation: operation.clientMutationId,
-        operation_kind: operation.kind,
-        operation_payload: operation.payload,
-        base_version: operation.baseVersion ?? null,
-      });
+      const { data, error } = operation.kind === "analysis.register"
+        ? await supabase.rpc("apply_offline_analysis_registration", {
+            target_device: input.deviceId,
+            target_mutation: operation.clientMutationId,
+            operation_payload: operation.payload,
+          })
+        : await supabase.rpc("apply_offline_operation", {
+            target_device: input.deviceId,
+            target_mutation: operation.clientMutationId,
+            operation_kind: operation.kind,
+            operation_payload: operation.payload,
+            base_version: operation.baseVersion ?? null,
+          });
       if (error) {
         results.push({
           clientMutationId: operation.clientMutationId,

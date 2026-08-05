@@ -1,5 +1,5 @@
 import { flagNumericResult } from "@/lib/clinical";
-import type { AnalysisDefinition, LabData, LabOrder, Patient, ResultValue } from "@/lib/types";
+import type { AnalysisDefinition, Analyst, LabData, LabOrder, Patient, ResultValue } from "@/lib/types";
 
 export function withSummary(data: LabData): LabData {
   return {
@@ -17,8 +17,7 @@ export function withSummary(data: LabData): LabData {
 }
 
 export function materializePatient(data: LabData, patient: Patient) {
-  const index = data.patients.findIndex((item) =>
-    item.id === patient.id || item.documentNumber === patient.documentNumber);
+  const index = data.patients.findIndex((item) => item.id === patient.id);
   const patients = [...data.patients];
   if (index >= 0) patients[index] = patient;
   else patients.unshift(patient);
@@ -26,9 +25,8 @@ export function materializePatient(data: LabData, patient: Patient) {
     ...order,
     patientName: patient.fullName,
     documentNumber: patient.documentNumber,
-    patientBirthAt: patient.birthAt,
+    patientBirthDate: patient.birthDate,
     patientSex: patient.sex,
-    patientPhone: patient.phone,
   } : order);
   return withSummary({ ...data, patients, orders });
 }
@@ -50,16 +48,18 @@ export function materializeRegistration(input: {
   patient: Patient;
   occurredAt: string;
   entries: LocalRegistrationEntry[];
+  analyst: Analyst;
   mutationId: string;
   actorName: string;
 }) {
+  const entries = input.entries.filter(({ value }) => value.trim().length > 0);
   const existing = input.data.orders.find((order) =>
     order.patientId === input.patient.id && sameClinicalDay(order.createdAt, input.occurredAt));
   const batchByGroup = new Map<string, string>();
-  input.entries.forEach(({ analysis }) => {
+  entries.forEach(({ analysis }) => {
     if (!batchByGroup.has(analysis.group)) batchByGroup.set(analysis.group, crypto.randomUUID());
   });
-  const results: ResultValue[] = input.entries.map(({ analysis, value }) => {
+  const results: ResultValue[] = entries.map(({ analysis, value }) => {
     const numericValue = analysis.resultType === "numeric" ? Number(value) : undefined;
     const base: ResultValue = {
       id: crypto.randomUUID(),
@@ -68,6 +68,7 @@ export function materializeRegistration(input: {
       batchId: batchByGroup.get(analysis.group)!,
       registeredAt: input.occurredAt,
       analyte: analysis.name,
+      analysisCode: analysis.code,
       group: analysis.group,
       resultType: analysis.resultType,
       value,
@@ -80,7 +81,8 @@ export function materializeRegistration(input: {
       criticalHigh: analysis.criticalHigh,
       flag: "normal",
       method: analysis.method,
-      performedBy: input.actorName,
+      analystId: input.analyst.id,
+      performedBy: input.analyst.fullName,
       qualitativeOptions: analysis.qualitativeOptions,
     };
     return analysis.resultType === "numeric" && Number.isFinite(numericValue)
@@ -89,7 +91,7 @@ export function materializeRegistration(input: {
   });
   const order: LabOrder = existing ? {
     ...existing,
-    groups: [...new Set([...existing.groups, ...input.entries.map((entry) => entry.analysis.group)])],
+    groups: [...new Set([...existing.groups, ...entries.map((entry) => entry.analysis.group)])],
     results: [...existing.results, ...results],
     syncState: "pending",
   } : {
@@ -101,9 +103,8 @@ export function materializeRegistration(input: {
     patientId: input.patient.id,
     patientName: input.patient.fullName,
     documentNumber: input.patient.documentNumber,
-    patientBirthAt: input.patient.birthAt,
+    patientBirthDate: input.patient.birthDate,
     patientSex: input.patient.sex,
-    patientPhone: input.patient.phone,
     createdAt: input.occurredAt,
     groups: [...batchByGroup.keys()],
     responsible: input.actorName,

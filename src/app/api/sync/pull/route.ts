@@ -6,7 +6,7 @@ export async function GET(request: Request) {
   try {
     const cursorValue = Number(new URL(request.url).searchParams.get("cursor") ?? "0");
     const cursor = Number.isSafeInteger(cursorValue) && cursorValue >= 0 ? cursorValue : 0;
-    const { supabase, user, profile } = await requireActiveOfflineUser();
+    const { supabase, user, account } = await requireActiveOfflineUser();
     const [{ data: latestChange, error: cursorError }, data] = await Promise.all([
       supabase.from("sync_change_log").select("sequence").order("sequence", { ascending: false }).limit(1).maybeSingle(),
       loadLabData(supabase, { offlineWindowDays: 90 }),
@@ -18,7 +18,7 @@ export async function GET(request: Request) {
       serverTime: new Date().toISOString(),
       mode: "snapshot",
       data,
-      currentUser: { id: user.id, fullName: profile.full_name, role: profile.role },
+      currentUser: { id: user.id, fullName: account.fullName, role: account.role },
     };
     return Response.json(bundle, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {

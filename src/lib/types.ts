@@ -1,13 +1,11 @@
 export type ResultFlag = "normal" | "low" | "high" | "critical" | "unreviewed";
 
 export type Patient = {
-  id: string;
+  id: number;
   documentNumber: string;
   fullName: string;
   birthDate: string;
-  birthAt: string;
   sex: "F" | "M" | "X" | "U";
-  phone?: string;
   syncVersion?: number;
   syncState?: "synced" | "pending" | "conflict";
   clientMutationId?: string;
@@ -24,9 +22,16 @@ export type LabData = {
   patients: Patient[];
   orders: LabOrder[];
   analyses: AnalysisDefinition[];
+  analysts: Analyst[];
   trend: { date: string; value: number }[];
   summary: AnalyticsSummary;
   reportSettings?: { tradeName: string; footer: string };
+};
+
+export type Analyst = {
+  id: string;
+  fullName: string;
+  active: boolean;
 };
 
 export type ResultValue = {
@@ -36,6 +41,7 @@ export type ResultValue = {
   batchId: string;
   registeredAt: string;
   analyte: string;
+  analysisCode?: string;
   group: string;
   resultType: "numeric" | "qualitative" | "text";
   value: string;
@@ -48,6 +54,7 @@ export type ResultValue = {
   criticalHigh?: number;
   flag: ResultFlag;
   method: string;
+  analystId?: string;
   performedBy: string;
   qualitativeOptions?: string[];
 };
@@ -58,12 +65,11 @@ export type LabOrder = {
   lockVersion: number;
   revisionNumber?: number;
   code: string;
-  patientId: string;
+  patientId: number;
   patientName: string;
   documentNumber: string;
-  patientBirthAt: string;
+  patientBirthDate: string;
   patientSex: Patient["sex"];
-  patientPhone?: string;
   createdAt: string;
   groups: string[];
   responsible: string;
