@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "build:patient-worker": "esbuild src/workers/patient-roster.worker.ts --bundle --minify --format=iife --platform=browser --target=es2020 --outfile=public/workers/patient-roster.worker.js",
+    "predev": "npm run build:patient-worker",
     "dev": "next dev",
+    "prebuild": "npm run build:patient-worker",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

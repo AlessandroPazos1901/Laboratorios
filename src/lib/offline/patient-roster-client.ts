@@ -8,7 +8,12 @@ import type {
 } from "@/lib/offline/patient-roster";
 
 function rosterWorker() {
-  return new Worker(new URL("../../workers/patient-roster.worker.ts", import.meta.url));
+  // Keep this worker independent from Turbopack's internal worker bootstrap.
+  // That bootstrap passes its configuration in the URL fragment, which can be
+  // lost when a PWA service worker serves the script from Cache Storage.
+  return new Worker("/workers/patient-roster.worker.js", {
+    name: "patient-roster",
+  });
 }
 
 export async function previewPatientRosterFile(file: File) {
