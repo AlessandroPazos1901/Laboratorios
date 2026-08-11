@@ -41,6 +41,48 @@ async function jsonResponse<T>(response: Response) {
   return body as T;
 }
 
+function unavailablePatientName(value: string) {
+  return !value.trim() || /no disponible|no encontrado|sin nombre/i.test(value);
+}
+
+function normalizeOfflineData(data: LabData, rejectIncomplete = false): LabData {
+  const patients = [...data.patients];
+  const patientsById = new Map(patients.map((patient) => [patient.id, patient]));
+
+  // Older snapshots may still have the patient duplicated inside an order.
+  // Recover that copy so DNI/name search works again without requiring a wipe.
+  for (const order of data.orders) {
+    if (patientsById.has(order.patientId) || unavailablePatientName(order.patientName)) continue;
+    const documentNumber = order.documentNumber || String(order.patientId).padStart(8, "0");
+    if (!/^\d{8}$/.test(documentNumber)) continue;
+    const recovered = {
+      id: order.patientId,
+      documentNumber,
+      fullName: order.patientName,
+      birthDate: order.patientBirthDate,
+      sex: order.patientSex,
+      syncVersion: 1,
+    } satisfies LabData["patients"][number];
+    patients.push(recovered);
+    patientsById.set(recovered.id, recovered);
+  }
+
+  const missingPatient = data.orders.some((order) => !patientsById.has(order.patientId));
+  if (rejectIncomplete && missingPatient) throw new Error("La descarga de pacientes está incompleta; se conservó la copia local anterior.");
+
+  const orders = data.orders.map((order) => {
+    const patient = patientsById.get(order.patientId);
+    return patient ? {
+      ...order,
+      patientName: patient.fullName,
+      documentNumber: patient.documentNumber,
+      patientBirthDate: patient.birthDate,
+      patientSex: patient.sex,
+    } : order;
+  });
+  return { ...data, patients, orders };
+}
+
 export function OfflineAppBootstrap() {
   const [status, setStatus] = useState<OfflineRuntimeStatus>("loading");
   const [online, setOnline] = useState(true);
@@ -63,7 +105,8 @@ export function OfflineAppBootstrap() {
       window.location.replace("/login");
       throw new Error("session_required");
     }
-    return jsonResponse<SyncBundle>(response);
+    const remote = await jsonResponse<SyncBundle>(response);
+    return { ...remote, data: normalizeOfflineData(remote.data, true) };
   }, []);
 
   const refreshCounters = useCallback(async (active: UnlockedVault) => {
@@ -77,6 +120,9 @@ export function OfflineAppBootstrap() {
 
   const refreshOnlineData = useCallback(async () => {
     const remote = await fetchBundle(session?.meta.cursor ?? 0);
+    if (session?.snapshot.data.patients.length && !remote.data.patients.length) {
+      throw new Error("La descarga no contiene pacientes; se conservó la copia local anterior.");
+    }
     setBundle(remote);
     setData(remote.data);
     setCurrentUser(remote.currentUser);
@@ -131,6 +177,9 @@ export function OfflineAppBootstrap() {
         }
       }
       const remote = await fetchBundle(working.meta.cursor);
+      if (working.snapshot.data.patients.length && !remote.data.patients.length) {
+        throw new Error("La descarga no contiene pacientes; se conservó la copia local anterior.");
+      }
       const snapshot = { data: remote.data, currentUser: remote.currentUser, updatedAt: remote.serverTime };
       working = await saveOfflineSnapshot(working, snapshot, remote.cursor);
       setSession(working);
@@ -232,7 +281,7 @@ export function OfflineAppBootstrap() {
   };
 
   async function enroll(pin: string, deviceName: string) {
-    if (!bundle || !PIN_PATTERN.test(pin)) throw new Error("El PIN debe tener al menos 8 dígitos.");
+    if (!bundle || !PIN_PATTERN.test(pin)) throw new Error("El PIN debe tener exactamente 4 dígitos.");
     const storage = await requestPersistentOfflineStorage();
     const available = Math.max(0, storage.quota - storage.usage);
     if (storage.quota && available < 25 * 1024 * 1024) throw new Error("El navegador no tiene al menos 25 MB libres para el modo offline.");
@@ -258,13 +307,17 @@ export function OfflineAppBootstrap() {
 
   async function unlock(pin: string) {
     const unlocked = await unlockOfflineVault(pin);
-    setSession(unlocked);
+    const normalized = {
+      ...unlocked,
+      snapshot: { ...unlocked.snapshot, data: normalizeOfflineData(unlocked.snapshot.data) },
+    };
+    setSession(normalized);
     setMeta(unlocked.meta);
-    setData(unlocked.snapshot.data);
+    setData(normalized.snapshot.data);
     setCurrentUser(unlocked.snapshot.currentUser);
     setStatus("unlocked");
-    await refreshCounters(unlocked);
-    if (navigator.onLine) void performSync(unlocked);
+    await refreshCounters(normalized);
+    if (navigator.onLine) void performSync(normalized);
   }
 
   async function renew() {
@@ -374,14 +427,14 @@ function EnrollPanel({ enroll }: { enroll(pin: string, deviceName: string): Prom
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   if (!open) return <div className="offline-enroll-banner"><ShieldCheck /><span><strong>Este equipo todavía depende de internet.</strong><small>Descarga una copia cifrada para continuar durante una caída.</small></span><button className="button primary" onClick={() => setOpen(true)}>Habilitar uso offline</button></div>;
-  return <div className="dialog-backdrop offline-setup-dialog"><section className="dialog-card"><p className="eyebrow">Equipo de confianza</p><h2>Habilitar uso offline</h2><p>La información clínica quedará cifrada en este perfil de Windows durante 72 horas.</p><label>Nombre del equipo<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} /></label><label>PIN local de 8 o más dígitos<input type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ""))} /></label>{error && <p className="form-error">{error}</p>}<div className="dialog-actions"><button className="button secondary" onClick={() => setOpen(false)}>Cancelar</button><button className="button primary" disabled={saving || !PIN_PATTERN.test(pin) || name.trim().length < 2} onClick={async () => { setSaving(true); setError(""); try { await enroll(pin, name.trim()); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo preparar el equipo."); } finally { setSaving(false); } }}>{saving ? "Cifrando…" : "Cifrar y habilitar"}</button></div></section></div>;
+  return <div className="dialog-backdrop offline-setup-dialog"><section className="dialog-card"><p className="eyebrow">Equipo de confianza</p><h2>Habilitar uso offline</h2><p>La información clínica quedará cifrada en este perfil de Windows durante 72 horas. Usa un perfil de Windows protegido y no compartas el PIN.</p><label>Nombre del equipo<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} /></label><label>PIN local de 4 dígitos<input type="password" inputMode="numeric" autoComplete="off" maxLength={4} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 4))} /></label>{error && <p className="form-error">{error}</p>}<div className="dialog-actions"><button className="button secondary" onClick={() => setOpen(false)}>Cancelar</button><button className="button primary" disabled={saving || !PIN_PATTERN.test(pin) || name.trim().length < 2} onClick={async () => { setSaving(true); setError(""); try { await enroll(pin, name.trim()); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo preparar el equipo."); } finally { setSaving(false); } }}>{saving ? "Cifrando…" : "Cifrar y habilitar"}</button></div></section></div>;
 }
 
 function UnlockGate(props: { meta: OfflineVaultMeta; expired: boolean; online: boolean; message: string; unlock(pin: string): Promise<void>; renew(): Promise<void>; deleteVault(): Promise<void> }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  return <main className="offline-gate"><section><span>{props.expired ? <CloudOff /> : <LockKeyhole />}</span><p className="eyebrow">{props.meta.deviceName}</p><h1>{props.expired ? "Autorización offline vencida" : "Bóveda clínica bloqueada"}</h1><p>{props.expired ? "Los datos siguen cifrados. Reconecta y renueva la autorización para abrirlos." : `Autorizado hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`}</p>{props.message && <p className="compat-note">{props.message}</p>}{!props.expired && <><label>PIN local<input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ""))} onKeyDown={(event) => { if (event.key === "Enter") (event.currentTarget.nextElementSibling as HTMLButtonElement | null)?.click(); }} /></label><button className="button primary wide" disabled={loading || !PIN_PATTERN.test(pin)} onClick={async () => { setLoading(true); setError(""); try { await props.unlock(pin); } catch (reason) { setError(reason instanceof Error && reason.message === "offline_pin_incorrect" ? "PIN incorrecto." : "No se pudo abrir la bóveda."); } finally { setLoading(false); } }}><KeyRound />{loading ? "Abriendo…" : "Desbloquear"}</button></>}{props.expired && <button className="button primary wide" disabled={!props.online || loading} onClick={async () => { setLoading(true); setError(""); try { await props.renew(); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo renovar."); } finally { setLoading(false); } }}><RefreshCw />{props.online ? "Renovar por 72 horas" : "Conecta este equipo"}</button>}{error && <p className="form-error">{error}</p>}<button className="text-button danger-text" onClick={() => void props.deleteVault()}><Trash2 />Eliminar datos offline de este equipo</button></section></main>;
+  return <main className="offline-gate"><section><span>{props.expired ? <CloudOff /> : <LockKeyhole />}</span><p className="eyebrow">{props.meta.deviceName}</p><h1>{props.expired ? "Autorización offline vencida" : "Bóveda clínica bloqueada"}</h1><p>{props.expired ? "Los datos siguen cifrados. Reconecta y renueva la autorización para abrirlos." : `Autorizado hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`}</p>{props.message && <p className="compat-note">{props.message}</p>}{!props.expired && <><label>PIN local<input autoFocus type="password" inputMode="numeric" autoComplete="off" maxLength={32} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 32))} onKeyDown={(event) => { if (event.key === "Enter") (event.currentTarget.nextElementSibling as HTMLButtonElement | null)?.click(); }} /></label><button className="button primary wide" disabled={loading || !PIN_PATTERN.test(pin)} onClick={async () => { setLoading(true); setError(""); try { await props.unlock(pin); } catch (reason) { setError(reason instanceof Error && reason.message === "offline_pin_incorrect" ? "PIN incorrecto." : "No se pudo abrir la bóveda."); } finally { setLoading(false); } }}><KeyRound />{loading ? "Abriendo…" : "Desbloquear"}</button></>}{props.expired && <button className="button primary wide" disabled={!props.online || loading} onClick={async () => { setLoading(true); setError(""); try { await props.renew(); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo renovar."); } finally { setLoading(false); } }}><RefreshCw />{props.online ? "Renovar por 72 horas" : "Conecta este equipo"}</button>}{error && <p className="form-error">{error}</p>}<button className="text-button danger-text" onClick={() => void props.deleteVault()}><Trash2 />Eliminar datos offline de este equipo</button></section></main>;
 }
 
 function OfflineStatusBar(props: { online: boolean; prepared: boolean; syncing: boolean; pending: number; conflicts: number; lastSyncAt?: string; message: string; updateAvailable: boolean; sync(): void; lock(): void; deleteVault(): void; activateUpdate(): void }) {

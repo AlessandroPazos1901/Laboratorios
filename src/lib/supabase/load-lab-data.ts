@@ -94,6 +94,24 @@ export async function loadLabData(
     supabase.from("lab_settings").select("trade_name,report_footer").eq("id", true).maybeSingle(),
   ]);
 
+  // Never turn a failed clinical query into an empty collection. Doing so
+  // would make a partial response look valid and overwrite the encrypted
+  // offline snapshot with missing patients or results.
+  const requiredResults = [
+    patientsResult,
+    ordersResult,
+    groupsResult,
+    analysesResult,
+    versionsResult,
+    analysisBatchesResult,
+    revisionsResult,
+    resultsResult,
+    analystsResult,
+    settingsResult,
+  ];
+  const requiredError = requiredResults.find((result) => result.error)?.error;
+  if (requiredError) throw requiredError;
+
   const patientRows = (patientsResult.data ?? []) as unknown as PatientRow[];
   const orderRows = (ordersResult.data ?? []) as OrderRow[];
   const groupRows = (groupsResult.data ?? []) as GroupRow[];
@@ -161,6 +179,10 @@ export async function loadLabData(
     sex: row.sex ?? "U",
     syncVersion: row.sync_version ?? 1,
   }));
+
+  if (orderRows.some((row) => !patientsById.has(row.patient_id))) {
+    throw new Error("patient_replica_incomplete");
+  }
 
   const orders: LabOrder[] = orderRows.map((row) => {
     const patient = patientsById.get(row.patient_id);

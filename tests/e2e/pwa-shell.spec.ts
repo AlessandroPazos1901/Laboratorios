@@ -1,9 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { PIN_PATTERN } from "../../src/lib/offline/crypto";
 
 test("publica un manifest instalable y un fallback sin datos clínicos", async ({ page, context }) => {
   const manifest = await page.request.get("/manifest.webmanifest");
   expect(manifest.ok()).toBeTruthy();
-  expect(await manifest.json()).toMatchObject({ display: "standalone", start_url: "/app" });
+  expect(await manifest.json()).toMatchObject({ display: "standalone", start_url: "/offline" });
+  expect(PIN_PATTERN.test("1234")).toBeTruthy();
+  expect(PIN_PATTERN.test("123")).toBeFalsy();
+  expect(PIN_PATTERN.test("12345")).toBeFalsy();
 
   await page.goto("/offline");
   await expect(page.getByText(/modo offline|continuidad operativa/i).first()).toBeVisible();
@@ -18,6 +22,17 @@ test("publica un manifest instalable y un fallback sin datos clínicos", async (
   await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBeTruthy();
 
   await context.setOffline(true);
-  await page.reload();
-  await expect(page.getByText(/modo offline|continuidad operativa/i).first()).toBeVisible();
+  await page.close();
+
+  // A new page in the same browser context models closing and reopening the
+  // installed PWA on a later day. It must boot from the cached start URL.
+  const reopened = await context.newPage();
+  await reopened.goto("/offline");
+  await expect(reopened.getByText(/modo offline|continuidad operativa/i).first()).toBeVisible();
+
+  // Existing installations may retain the old /app start URL until Chrome
+  // refreshes the manifest. They must still fall back to the offline shell.
+  const legacyLaunch = await context.newPage();
+  await legacyLaunch.goto("/app");
+  await expect(legacyLaunch.getByText(/modo offline|continuidad operativa/i).first()).toBeVisible();
 });

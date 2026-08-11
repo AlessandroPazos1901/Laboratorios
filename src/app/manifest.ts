@@ -5,7 +5,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "LIMS Jose - Laboratorio Clinico",
     short_name: "LIMS Jose",
     description: "Gestion clinica segura con continuidad sin conexion.",
-    start_url: "/app",
+    start_url: "/offline",
     scope: "/",
     display: "standalone",
     background_color: "#f4f7f8",

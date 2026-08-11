@@ -1,7 +1,9 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export const PIN_PATTERN = /^\d{8,}$/;
+// New enrollments use four digits. Keep accepting the former 8+ digit format
+// so an already-enrolled computer can still decrypt its existing vault.
+export const PIN_PATTERN = /^(?:\d{4}|\d{8,})$/;
 export const PBKDF2_ITERATIONS = 600_000;
 
 export type EncryptedValue = { ciphertext: string; iv: string };
