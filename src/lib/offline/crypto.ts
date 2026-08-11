@@ -1,5 +1,6 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const searchKeys = new WeakMap<CryptoKey, Promise<CryptoKey>>();
 
 // New enrollments use four digits. Keep accepting the former 8+ digit format
 // so an already-enrolled computer can still decrypt its existing vault.
@@ -75,5 +76,29 @@ export async function wrapDataKey(dataKey: CryptoKey, pinKey: CryptoKey) {
 
 export async function unwrapDataKey(value: EncryptedValue, pinKey: CryptoKey) {
   const raw = await decryptBytes(pinKey, value);
-  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+}
+
+export function createSearchKey(dataKey: CryptoKey) {
+  let derived = searchKeys.get(dataKey);
+  if (!derived) {
+    derived = crypto.subtle.exportKey("raw", dataKey).then(async (raw) => {
+      const material = await crypto.subtle.importKey("raw", raw, "HKDF", false, ["deriveKey"]);
+      return crypto.subtle.deriveKey({
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: encoder.encode("lims-jose-offline-search-v1"),
+        info: encoder.encode("patient-roster-index"),
+      }, material, { name: "HMAC", hash: "SHA-256", length: 256 }, false, ["sign"]);
+    });
+    searchKeys.set(dataKey, derived);
+  }
+  return derived;
+}
+
+export async function searchToken(key: CryptoKey, value: string) {
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
+  // 128 bits keeps collision risk negligible while avoiding hundreds of MB
+  // of repeated index text for directories with more than half a million rows.
+  return toBase64(new Uint8Array(signature).slice(0, 16));
 }

@@ -28,6 +28,7 @@ const fmtBirthDate = (date: string) => date
   ? new Intl.DateTimeFormat("es-PE", { dateStyle: "medium" }).format(new Date(date))
   : "No registrada";
 const sexLabel = { F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as const;
+const normalizePatientLookup = (value: string) => value.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("es");
 function printPdfInBrowser(blob: Blob) {
   return new Promise<void>((resolve, reject) => {
     const reportUrl = URL.createObjectURL(blob);
@@ -288,15 +289,49 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   const [patientSaving, setPatientSaving] = useState(false);
   const [patientError, setPatientError] = useState("");
   const [error, setError] = useState("");
-  const existing = patients.find((patient) => patient.documentNumber === dni);
+  const [directoryMatches, setDirectoryMatches] = useState<LabData["patients"]>([]);
+  const [directoryPatient, setDirectoryPatient] = useState<LabData["patients"][number] | null>(null);
+  const existing = patients.find((patient) => patient.documentNumber === dni)
+    ?? (directoryPatient?.documentNumber === dni ? directoryPatient : undefined);
   const activeGroupName = selectedGroup || groups[0]?.group || "";
   const currentGroup = groups.find((group) => group.group === activeGroupName) ?? null;
   const currentAnalyses = currentGroup?.items ?? [];
-  const patientMatches = patientQuery.trim().length >= 2
-    ? patients.filter((patient) => `${patient.documentNumber} ${patient.fullName}`.toLocaleLowerCase("es").includes(patientQuery.trim().toLocaleLowerCase("es"))).slice(0, 6)
-    : [];
+  const patientMatches = useMemo(() => {
+    if (patientQuery.trim().length < 2) return [];
+    const normalized = normalizePatientLookup(patientQuery.trim());
+    const current = patients.filter((patient) => normalizePatientLookup(`${patient.documentNumber} ${patient.fullName}`).includes(normalized));
+    const localDirectory = patientQuery.trim().length >= 4
+      ? directoryMatches.filter((patient) => normalizePatientLookup(`${patient.documentNumber} ${patient.fullName}`).includes(normalized.split(/\s+/).at(-1) ?? normalized))
+      : [];
+    return [...new Map([...current, ...localDirectory].map((patient) => [patient.documentNumber, patient])).values()].slice(0, 8);
+  }, [directoryMatches, patientQuery, patients]);
   const allAnalyses = useMemo(() => groups.flatMap((group) => group.items), [groups]);
   const completedAnalyses = allAnalyses.filter((analysis) => resultValues[analysis.versionId]?.trim());
+
+  useEffect(() => {
+    if (!offlineRepository?.enabled || patientQuery.trim().length < 4) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void offlineRepository.searchPatients(patientQuery, 8).then((matches) => {
+        if (cancelled) return;
+        setDirectoryMatches(matches);
+        const exactDni = patientQuery.trim();
+        const exact = /^\d{8}$/.test(exactDni) ? matches.find((patient) => patient.documentNumber === exactDni) : null;
+        if (exact) {
+          setDirectoryPatient(exact);
+          setName(exact.fullName);
+          setBirthDate(exact.birthDate);
+          setSex(exact.sex === "U" ? "" : exact.sex);
+        }
+      }).catch(() => {
+        if (!cancelled) setDirectoryMatches([]);
+      });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [offlineRepository, patientQuery]);
 
   function changeAnalysisResult(analysis: AnalysisDefinition, rawValue: string) {
     const sanitized = sanitizeResultInput(analysis.resultType, rawValue);
@@ -319,12 +354,15 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
     const normalized = rawValue.replace(/\D/g, "").slice(0, 8);
     const matched = patients.find((patient) => patient.documentNumber === normalized);
     setDni(normalized);
+    setPatientQuery(normalized);
     setPatientError("");
     if (matched) {
+      setDirectoryPatient(null);
       setName(matched.fullName);
       setBirthDate(matched.birthDate);
       setSex(matched.sex === "U" ? "" : matched.sex);
-    } else if (existing) {
+    } else if (existing && existing.documentNumber !== normalized) {
+      setDirectoryPatient(null);
       setName("");
       setBirthDate("");
       setSex("");
@@ -332,6 +370,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   }
 
   function choosePatient(patient: LabData["patients"][number]) {
+    setDirectoryPatient(patient);
     setPatientQuery(`${patient.fullName} · ${patient.documentNumber}`);
     setDni(patient.documentNumber);
     setName(patient.fullName);
@@ -770,31 +809,31 @@ function AddPatientDialog({ close, notify }: { close: () => void; notify: (messa
   </div>;
 }
 
-type PatientImportPreview = {
-  file: string;
-  warning: string | null;
-  sheets: { name: string; rows: number; headers: string[]; sampleRows: string[][] }[];
-};
-
 function PatientImportDialog({ close, notify }: { close: () => void; notify: (message: string) => void }) {
-  const router = useRouter();
   const offlineRepository = useOfflineRepository();
   const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<PatientImportPreview | null>(null);
+  const [preview, setPreview] = useState<Awaited<ReturnType<NonNullable<typeof offlineRepository>["previewPatientRoster"]>> | null>(null);
   const [sheetName, setSheetName] = useState("");
   const [nameColumn, setNameColumn] = useState(0);
   const [dniColumn, setDniColumn] = useState(0);
+  const [birthDateColumn, setBirthDateColumn] = useState(0);
+  const [sexColumn, setSexColumn] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<{ processed: number; total: number; imported: number; failed: number; phase: "importing" | "activating" } | null>(null);
   const [error, setError] = useState("");
-  const [result, setResult] = useState<{ imported: number; failed: number; total: number; failures: { row: number; reason: string }[] } | null>(null);
+  const [result, setResult] = useState<{ imported: number; failed: number; duplicates: number; total: number; failures: { row: number; reason: string }[] } | null>(null);
   const activeSheet = preview?.sheets.find((sheet) => sheet.name === sheetName) ?? preview?.sheets[0] ?? null;
 
-  function suggestColumns(sheet: PatientImportPreview["sheets"][number]) {
+  function suggestColumns(sheet: NonNullable<typeof preview>["sheets"][number]) {
     const normalize = (value: string) => value.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("es");
     const suggestedName = sheet.headers.findIndex((header) => /nombre|paciente|name/.test(normalize(header))) + 1;
     const suggestedDni = sheet.headers.findIndex((header) => /dni|documento|doc\.?/.test(normalize(header))) + 1;
+    const suggestedBirthDate = sheet.headers.findIndex((header) => /nacimiento|fec.*nac|fecnac|birth/.test(normalize(header))) + 1;
+    const suggestedSex = sheet.headers.findIndex((header) => /sexo|sex|genero|idsexo/.test(normalize(header))) + 1;
     setNameColumn(suggestedName);
     setDniColumn(suggestedDni);
+    setBirthDateColumn(suggestedBirthDate);
+    setSexColumn(suggestedSex);
   }
 
   function chooseSheet(name: string, data = preview) {
@@ -807,65 +846,80 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
     setFile(nextFile);
     setPreview(null);
     setResult(null);
+    setProgress(null);
     setError("");
     if (!nextFile) return;
-    if (offlineRepository && !offlineRepository.online) return setError("La importación de Excel requiere conexión.");
+    if (!offlineRepository?.enabled) return setError("Primero habilita y desbloquea el modo offline en este equipo.");
+    if (!/\.(xlsb|xlsx|xlsm|xls)$/i.test(nextFile.name)) return setError("Selecciona un archivo XLSB, XLSX, XLSM o XLS.");
+    if (nextFile.size > 200 * 1024 * 1024) return setError("El archivo supera el límite de 200 MB.");
     setLoading(true);
-    const form = new FormData();
-    form.append("action", "preview");
-    form.append("file", nextFile);
-    const response = await fetch("/api/patients/import", { method: "POST", body: form });
-    const data = await response.json() as PatientImportPreview & { error?: string };
-    setLoading(false);
-    if (!response.ok) return setError(data.error ?? "No se pudo leer el archivo.");
-    setPreview(data);
-    if (data.sheets[0]) chooseSheet(data.sheets[0].name, data);
+    try {
+      const data = await offlineRepository.previewPatientRoster(nextFile);
+      if (!data.sheets.some((sheet) => sheet.headers.length > 0)) throw new Error("No se encontraron hojas con encabezados.");
+      setPreview(data);
+      const firstSheet = data.sheets.find((sheet) => sheet.headers.length > 0);
+      if (firstSheet) chooseSheet(firstSheet.name, data);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "No se pudo leer el archivo.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function importPatients() {
-    if (offlineRepository && !offlineRepository.online) return setError("La importación de Excel requiere conexión.");
-    if (!file || !activeSheet) return;
-    if (!nameColumn || !dniColumn || nameColumn === dniColumn) return setError("Mapea columnas diferentes para Nombre y DNI.");
+    if (!offlineRepository?.enabled || !file || !activeSheet) return setError("El modo offline debe estar desbloqueado.");
+    const columns = [dniColumn, nameColumn, birthDateColumn, sexColumn];
+    if (columns.some((column) => !column) || new Set(columns).size !== columns.length) {
+      return setError("Mapea cuatro columnas diferentes: DNI, nombre completo, nacimiento y sexo.");
+    }
     setError("");
     setLoading(true);
-    const form = new FormData();
-    form.append("action", "import");
-    form.append("file", file);
-    form.append("sheet", activeSheet.name);
-    form.append("nameColumn", String(nameColumn));
-    form.append("dniColumn", String(dniColumn));
-    const response = await fetch("/api/patients/import", { method: "POST", body: form });
-    const data = await response.json() as { imported: number; failed: number; total: number; failures: { row: number; reason: string }[]; error?: string };
-    setLoading(false);
-    if (!response.ok) return setError(data.error ?? "No se pudo importar el archivo.");
-    setResult(data);
-    notify(`${data.imported} pacientes importados o actualizados.`);
-    if (offlineRepository) await offlineRepository.refresh();
-    else router.refresh();
+    setProgress({ processed: 0, total: activeSheet.rows, imported: 0, failed: 0, phase: "importing" });
+    try {
+      const data = await offlineRepository.importPatientRoster({
+        file,
+        mapping: { sheetName: activeSheet.name, dniColumn, nameColumn, birthDateColumn, sexColumn },
+        estimatedRows: activeSheet.rows,
+        onProgress: setProgress,
+      });
+      setResult(data);
+      notify(`${data.imported.toLocaleString("es-PE")} pacientes disponibles para búsqueda offline.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "No se pudo crear la base local.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   const step = result ? 3 : preview ? 2 : 1;
+  const mappedColumns = [dniColumn, nameColumn, birthDateColumn, sexColumn];
+  const validMapping = mappedColumns.every(Boolean) && new Set(mappedColumns).size === mappedColumns.length;
+  const percent = progress?.total ? Math.min(100, Math.floor((progress.processed / progress.total) * 100)) : 0;
+  const columnOptions = activeSheet?.headers.map((header, index) => <option value={index + 1} key={`${header}-${index}`}>{header || `Columna ${index + 1}`}</option>);
   return <div className="dialog-backdrop" role="presentation">
     <section className="dialog-card patient-import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-patients-title">
-      <div className="import-dialog-head"><div><p className="eyebrow">Carga masiva</p><h2 id="import-patients-title">Importar pacientes</h2><p>Sube un Excel y relaciona únicamente Nombre y DNI.</p></div><button className="icon-button" type="button" onClick={close} aria-label="Cerrar"><X /></button></div>
+      <div className="import-dialog-head"><div><p className="eyebrow">Directorio local</p><h2 id="import-patients-title">Vincular base de pacientes</h2><p>El archivo se procesa en este equipo y no se envía a Supabase.</p></div><button className="icon-button" type="button" onClick={close} aria-label="Cerrar" disabled={loading}><X /></button></div>
       <div className="import-steps" aria-label="Progreso"><span className={step >= 1 ? "active" : ""}><b>1</b>Archivo</span><span className={step >= 2 ? "active" : ""}><b>2</b>Mapeo</span><span className={step >= 3 ? "active" : ""}><b>3</b>Resultado</span></div>
       <div className="patient-import-body">
-        {!preview && !result && <div className="import-dropzone"><Import /><h3>Selecciona el archivo de pacientes</h3><p>Formato XLSX o XLSM · máximo 15 MB · primera fila con encabezados.</p><label className="button primary file-button">Elegir Excel<input type="file" accept=".xlsx,.xlsm" onChange={(event) => selectFile(event.target.files?.[0] ?? null)} /></label>{file && <small>{file.name}</small>}{loading && <div className="import-progress"><i /><span>Analizando archivo...</span></div>}</div>}
+        {!preview && !result && <div className="import-dropzone"><Import /><h3>Selecciona el archivo de pacientes</h3><p>XLSB, XLSX, XLSM o XLS · máximo 200 MB · primera fila con encabezados.</p><label className="button primary file-button">Elegir Excel<input type="file" accept=".xlsb,.xlsx,.xlsm,.xls" onChange={(event) => selectFile(event.target.files?.[0] ?? null)} /></label>{file && <small>{file.name}</small>}{loading && <div className="import-progress"><i /><span>Analizando el archivo en este equipo...</span></div>}</div>}
         {preview && !result && activeSheet && <>
           <div className="import-file-summary"><FileClock /><span><strong>{preview.file}</strong><small>{activeSheet.rows} filas en la hoja seleccionada</small></span><button className="text-button" type="button" onClick={() => selectFile(null)}>Cambiar archivo</button></div>
           {preview.warning && <p className="warning-line"><CircleAlert />{preview.warning}</p>}
           <div className="import-mapping-grid">
             <label>Hoja<select value={activeSheet.name} onChange={(event) => chooseSheet(event.target.value)}>{preview.sheets.map((sheet) => <option key={sheet.name}>{sheet.name}</option>)}</select></label>
-            <label>Columna de nombre<select value={nameColumn} onChange={(event) => setNameColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{activeSheet.headers.map((header, index) => <option value={index + 1} key={`${header}-${index}`}>{header}</option>)}</select></label>
-            <label>Columna de DNI<select value={dniColumn} onChange={(event) => setDniColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{activeSheet.headers.map((header, index) => <option value={index + 1} key={`${header}-${index}`}>{header}</option>)}</select></label>
+            <label>Columna de DNI<select value={dniColumn} onChange={(event) => setDniColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{columnOptions}</select></label>
+            <label>Nombre completo<select value={nameColumn} onChange={(event) => setNameColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{columnOptions}</select></label>
+            <label>Fecha de nacimiento<select value={birthDateColumn} onChange={(event) => setBirthDateColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{columnOptions}</select></label>
+            <label>Sexo (M/F)<select value={sexColumn} onChange={(event) => setSexColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{columnOptions}</select></label>
           </div>
-          <div className="import-preview-table table-wrap"><table><thead><tr><th>Fila</th><th>Nombre</th><th>DNI</th></tr></thead><tbody>{activeSheet.sampleRows.map((row, index) => <tr key={index}><td>{index + 2}</td><td>{nameColumn ? row[nameColumn - 1] || "—" : "Selecciona una columna"}</td><td className="mono">{dniColumn ? row[dniColumn - 1] || "—" : "Selecciona una columna"}</td></tr>)}</tbody></table></div>
-          <p className="compat-note"><ShieldCheck />Los DNI existentes se actualizarán; no se crearán pacientes duplicados.</p>
+          <div className="import-preview-table table-wrap"><table><thead><tr><th>Fila</th><th>DNI</th><th>Nombre completo</th><th>Nacimiento</th><th>Sexo</th></tr></thead><tbody>{activeSheet.sampleRows.map((row, index) => <tr key={index}><td>{index + 2}</td><td className="mono">{dniColumn ? row[dniColumn - 1] || "—" : "Selecciona"}</td><td>{nameColumn ? row[nameColumn - 1] || "—" : "Selecciona"}</td><td>{birthDateColumn ? row[birthDateColumn - 1] || "—" : "Selecciona"}</td><td>{sexColumn ? row[sexColumn - 1] || "—" : "Selecciona"}</td></tr>)}</tbody></table></div>
+          <p className="compat-note"><ShieldCheck />La base quedará disponible en este equipo. Solo los pacientes utilizados en un análisis se sincronizarán con Supabase.</p>
+          {loading && progress && <div className="roster-import-progress"><div><i style={{ width: `${percent}%` }} /></div>{progress.phase === "activating" ? <p><strong>Activando la base local…</strong> Este último paso puede tardar unos segundos.</p> : <p><strong>{percent}%</strong> · {progress.processed.toLocaleString("es-PE")} de {progress.total.toLocaleString("es-PE")} filas · {progress.imported.toLocaleString("es-PE")} únicas</p>}</div>}
         </>}
-        {result && <div className="import-result"><span className="import-result-icon"><Check /></span><h3>Importación terminada</h3><p>{result.imported} pacientes importados o actualizados.</p><div><span><strong>{result.total}</strong> procesados</span><span><strong>{result.failed}</strong> con observaciones</span></div>{result.failures.length > 0 && <div className="import-failures"><strong>Filas que requieren revisión</strong>{result.failures.slice(0, 8).map((failure) => <p key={`${failure.row}-${failure.reason}`}><b>Fila {failure.row}</b>{failure.reason}</p>)}</div>}</div>}
+        {result && <div className="import-result"><span className="import-result-icon"><Check /></span><h3>Base local preparada</h3><p>{result.imported.toLocaleString("es-PE")} pacientes únicos ya se pueden buscar sin internet.</p><div><span><strong>{result.total.toLocaleString("es-PE")}</strong> procesados</span><span><strong>{result.failed.toLocaleString("es-PE")}</strong> filas inválidas</span><span><strong>{result.duplicates.toLocaleString("es-PE")}</strong> duplicados ignorados</span></div>{result.failures.length > 0 && <div className="import-failures"><strong>Filas inválidas que requieren revisión</strong>{result.failures.slice(0, 8).map((failure) => <p key={`${failure.row}-${failure.reason}`}><b>Fila {failure.row}</b>{failure.reason}</p>)}</div>}</div>}
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
-      <div className="import-dialog-actions"><span>{preview && !result ? "Verifica la vista previa antes de continuar." : "Solo se procesan Nombre y DNI."}</span><div><button className="button secondary" type="button" onClick={close}>{result ? "Cerrar" : "Cancelar"}</button>{preview && !result && <button className="button primary" type="button" disabled={loading || !nameColumn || !dniColumn || nameColumn === dniColumn} onClick={importPatients}>{loading ? "Importando..." : "Importar pacientes"}</button>}</div></div>
+      <div className="import-dialog-actions"><span>{preview && !result ? "Comprueba las cuatro columnas antes de crear el índice local." : "La base completa permanece únicamente en este equipo."}</span><div><button className="button secondary" type="button" onClick={close} disabled={loading}>{result ? "Cerrar" : "Cancelar"}</button>{preview && !result && <button className="button primary" type="button" disabled={loading || !validMapping} onClick={importPatients}>{loading ? progress?.phase === "activating" ? "Activando…" : `Preparando ${percent}%` : "Crear base local"}</button>}</div></div>
     </section>
   </div>;
 }
@@ -945,7 +999,8 @@ function PatientsView({ patients, orders, openOrder, notify }: { patients: LabDa
     return `${patient.documentNumber} ${patient.fullName}`.toLocaleLowerCase("es").includes(value);
   });
   const selected = visiblePatients.find((patient) => patient.id === selectedId) ?? visiblePatients[0] ?? null;
-  const patientActions = <div className="patient-page-actions"><button className="button secondary" disabled={Boolean(offlineRepository && !offlineRepository.online)} title={offlineRepository && !offlineRepository.online ? "La importación requiere internet" : undefined} onClick={() => setImporting(true)}><Import />Importar</button><button className="button primary" onClick={() => setAdding(true)}><Plus />Agregar paciente</button></div>;
+  const localRosterLocked = Boolean(offlineRepository && !offlineRepository.enabled);
+  const patientActions = <div className="patient-page-actions"><button className="button secondary" disabled={localRosterLocked} title={localRosterLocked ? "Habilita y desbloquea el modo offline para guardar la base cifrada" : "Crear o reemplazar el directorio local de pacientes"} onClick={() => setImporting(true)}><Database />Base local</button><button className="button primary" onClick={() => setAdding(true)}><Plus />Agregar paciente</button></div>;
   if (!selected) return <><PageHead eyebrow="Registro maestro" title="Pacientes" text="Identidad única e historial de análisis." action={patientActions} /><article className="panel"><div className="empty"><Users /><h3>No hay pacientes registrados</h3><p>Agrega el primer paciente por DNI para comenzar.</p><button className="button primary" onClick={() => setAdding(true)}>Agregar paciente</button></div></article>{adding && <AddPatientDialog close={() => setAdding(false)} notify={notify} />}{importing && <PatientImportDialog close={() => setImporting(false)} notify={notify} />}</>;
   const patientOrders = orders.filter((order) => order.patientId === selected.id);
   const patientResults = patientOrders.flatMap((order) => order.results.map((result) => ({ order, result })))

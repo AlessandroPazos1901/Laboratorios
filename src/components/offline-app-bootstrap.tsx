@@ -23,7 +23,9 @@ import {
   type UnlockedVault,
 } from "@/lib/offline/db";
 import { PIN_PATTERN } from "@/lib/offline/crypto";
+import { probeServerConnectivity } from "@/lib/offline/connectivity";
 import { OfflineRepositoryProvider } from "@/lib/offline/repository";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import {
   OFFLINE_MODE_ENABLED,
   type OfflineLease,
@@ -85,7 +87,7 @@ function normalizeOfflineData(data: LabData, rejectIncomplete = false): LabData 
 
 export function OfflineAppBootstrap() {
   const [status, setStatus] = useState<OfflineRuntimeStatus>("loading");
-  const [online, setOnline] = useState(true);
+  const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
   const [data, setData] = useState<LabData | null>(null);
   const [currentUser, setCurrentUser] = useState<SyncBundle["currentUser"] | null>(null);
   const [bundle, setBundle] = useState<SyncBundle | null>(null);
@@ -100,7 +102,14 @@ export function OfflineAppBootstrap() {
   const syncingRef = useRef(false);
 
   const fetchBundle = useCallback(async (cursor = 0) => {
-    const response = await fetch(`/api/sync/pull?cursor=${cursor}`, { cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(`/api/sync/pull?cursor=${cursor}`, { cache: "no-store" });
+      setOnline(true);
+    } catch (reason) {
+      setOnline(false);
+      throw reason;
+    }
     if (response.status === 401) {
       window.location.replace("/login");
       throw new Error("session_required");
@@ -191,7 +200,9 @@ export function OfflineAppBootstrap() {
       setMessage("Sincronización completada.");
     } catch (error) {
       const text = error instanceof Error ? error.message : "sync_failed";
-      setMessage(text.includes("fetch") ? "Sin conexión con el servidor; los cambios siguen protegidos en este equipo." : `Sincronización pendiente: ${text}`);
+      const reachable = await probeServerConnectivity();
+      setOnline(reachable);
+      setMessage(!reachable ? "Sin conexión con el servidor; los cambios siguen protegidos en este equipo." : `Sincronización pendiente: ${text}`);
       const queued = await listOfflineOperations(working, ["syncing"]);
       await Promise.all(queued.map(({ operation }) => setOfflineOperationStatus(working, operation.clientMutationId, "pending")));
       await refreshCounters(working);
@@ -204,23 +215,25 @@ export function OfflineAppBootstrap() {
   useEffect(() => {
     let mounted = true;
     async function start() {
-      if (!OFFLINE_MODE_ENABLED) {
-        setStatus("disabled");
-        return;
-      }
-      const localMeta = await getActiveVaultMeta();
-      if (!mounted) return;
-      setMeta(localMeta ?? null);
-      if (localMeta) {
-        setStatus(new Date(localMeta.lease.expiresAt).getTime() <= Date.now() ? "expired" : "locked");
-        return;
-      }
-      if (!navigator.onLine) {
-        setOnline(false);
-        setStatus("not-prepared");
-        return;
-      }
       try {
+        if (!OFFLINE_MODE_ENABLED) {
+          setStatus("disabled");
+          return;
+        }
+        const localMeta = await getActiveVaultMeta();
+        if (!mounted) return;
+        setMeta(localMeta ?? null);
+        if (localMeta) {
+          setStatus(new Date(localMeta.lease.expiresAt).getTime() <= Date.now() ? "expired" : "locked");
+          return;
+        }
+        const reachable = await probeServerConnectivity();
+        if (!mounted) return;
+        setOnline(reachable);
+        if (!reachable) {
+          setStatus("not-prepared");
+          return;
+        }
         const remote = await fetchBundle();
         if (!mounted) return;
         setBundle(remote);
@@ -229,7 +242,10 @@ export function OfflineAppBootstrap() {
         setStatus("not-prepared");
       } catch (error) {
         if (!mounted) return;
-        setMessage(error instanceof Error ? error.message : "No se pudo iniciar la aplicación.");
+        const reason = error instanceof Error ? error.message : "";
+        setMessage(reason === "offline_database_blocked"
+          ? "La base local está abierta en otra ventana. Cierra todas las pestañas y la PWA de LIMS José, luego vuelve a abrir una sola."
+          : reason || "No se pudo iniciar la aplicación.");
         setStatus("error");
       }
     }
@@ -238,25 +254,39 @@ export function OfflineAppBootstrap() {
   }, [fetchBundle]);
 
   useEffect(() => {
-    const wentOnline = () => { setOnline(true); if (session) void performSync(session); };
+    let mounted = true;
+    const checkConnectivity = async (syncWhenConnected = false) => {
+      const reachable = await probeServerConnectivity();
+      if (!mounted) return false;
+      setOnline(reachable);
+      if (reachable && syncWhenConnected && session) void performSync(session);
+      return reachable;
+    };
+    const wentOnline = () => { void checkConnectivity(true); };
     const wentOffline = () => setOnline(false);
     window.addEventListener("online", wentOnline);
     window.addEventListener("offline", wentOffline);
-    const interval = window.setInterval(() => {
+    const visibilityChanged = () => { if (document.visibilityState === "visible") void checkConnectivity(true); };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    void checkConnectivity(false);
+    const interval = window.setInterval(async () => {
+      const reachable = await checkConnectivity(false);
       if (!session) return;
       const expired = new Date(session.meta.lease.expiresAt).getTime() <= Date.now();
-      if (expired && !navigator.onLine) {
+      if (expired && !reachable) {
         setSession(null);
         setData(null);
         setCurrentUser(null);
         setStatus("expired");
-      } else if (navigator.onLine) {
+      } else if (reachable) {
         void performSync(session);
       }
-    }, 30_000);
+    }, 10_000);
     return () => {
+      mounted = false;
       window.removeEventListener("online", wentOnline);
       window.removeEventListener("offline", wentOffline);
+      document.removeEventListener("visibilitychange", visibilityChanged);
       window.clearInterval(interval);
     };
   }, [performSync, session]);
@@ -276,7 +306,7 @@ export function OfflineAppBootstrap() {
 
   const requestSync = () => {
     syncRequested.current += 1;
-    if (session && navigator.onLine) window.setTimeout(() => void performSync(session), 0);
+    if (session && online) window.setTimeout(() => void performSync(session), 0);
     if (session) void refreshCounters(session);
   };
 
@@ -317,11 +347,11 @@ export function OfflineAppBootstrap() {
     setCurrentUser(unlocked.snapshot.currentUser);
     setStatus("unlocked");
     await refreshCounters(normalized);
-    if (navigator.onLine) void performSync(normalized);
+    if (online) void performSync(normalized);
   }
 
   async function renew() {
-    if (!meta || !navigator.onLine) return;
+    if (!meta || !online) return;
     const { lease } = await jsonResponse<{ lease: OfflineLease }>(await fetch("/api/offline/renew", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -335,11 +365,19 @@ export function OfflineAppBootstrap() {
 
   async function deleteVault() {
     if (!window.confirm("Se eliminarán los datos offline de este equipo. No continúes si existen cambios pendientes.")) return;
-    if (meta && navigator.onLine) {
+    if (meta && online) {
       await fetch(`/api/offline/devices/${meta.deviceId}`, { method: "DELETE" }).catch(() => undefined);
     }
     await deleteActiveOfflineVault();
     window.location.reload();
+  }
+
+  async function signOutAfterStartupError() {
+    try {
+      if (isSupabaseConfigured) await createClient().auth.signOut({ scope: "local" });
+    } finally {
+      window.location.replace("/login");
+    }
   }
 
   async function acceptRemote(conflict: SyncConflict) {
@@ -370,7 +408,7 @@ export function OfflineAppBootstrap() {
     return <OfflineGate icon={<CloudOff />} title="Modo offline desactivado" text="Activa NEXT_PUBLIC_OFFLINE_MODE después de aplicar la migración y configurar las claves de autorización." />;
   }
   if (status === "loading") return <OfflineGate icon={<Activity className="spin" />} title="Preparando LIMS Jose" text="Verificando la aplicación y el almacenamiento seguro…" />;
-  if (status === "error") return <OfflineGate icon={<CloudOff />} title="No se pudo abrir el sistema" text={message || "Reconecta este equipo y vuelve a intentarlo."} />;
+  if (status === "error") return <OfflineGate icon={<CloudOff />} title="No se pudo abrir el sistema" text={message || "Reconecta este equipo y vuelve a intentarlo."} actionLabel="Cerrar sesión y volver al ingreso" action={signOutAfterStartupError} />;
   if (status === "not-prepared" && !data) {
     return <OfflineGate icon={<Database />} title="Este equipo no está preparado" text="Conéctalo a internet, inicia sesión y habilita el modo offline antes de la próxima interrupción." />;
   }
@@ -416,8 +454,8 @@ export function OfflineAppBootstrap() {
   </OfflineRepositoryProvider>;
 }
 
-function OfflineGate({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
-  return <main className="offline-gate"><section><span>{icon}</span><p className="eyebrow">Continuidad operativa</p><h1>{title}</h1><p>{text}</p><Image src="/logo_laboratorio.png" width={786} height={156} alt="Laboratorio Clínico Centro de Salud" /></section></main>;
+function OfflineGate({ icon, title, text, actionLabel, action }: { icon: React.ReactNode; title: string; text: string; actionLabel?: string; action?: () => void | Promise<void> }) {
+  return <main className="offline-gate"><section><span>{icon}</span><p className="eyebrow">Continuidad operativa</p><h1>{title}</h1><p>{text}</p>{actionLabel && action && <button className="button primary" onClick={() => void action()}>{actionLabel}</button>}<Image src="/logo_laboratorio.png" width={786} height={156} alt="Laboratorio Clínico Centro de Salud" /></section></main>;
 }
 
 function EnrollPanel({ enroll }: { enroll(pin: string, deviceName: string): Promise<void> }) {

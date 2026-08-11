@@ -1,15 +1,23 @@
 "use client";
 
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { buildLabReportPdf } from "@/lib/report-pdf";
 import { formatPatientAgeAt } from "@/lib/clinical";
 import { patientIdFromDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/client";
 import {
+  activatePatientRoster,
+  beginPatientRosterImport,
+  cleanupInactivePatientRosters,
   commitOfflineMutation,
+  discardPatientRosterImport,
+  getPatientRosterMetadata,
   listOfflineOperations,
+  searchPatientRoster,
+  writePatientRosterBatch,
   type UnlockedVault,
 } from "@/lib/offline/db";
+import { previewPatientRosterFile, streamPatientRosterFile } from "@/lib/offline/patient-roster-client";
 import {
   materializePatient,
   materializeRegistration,
@@ -17,6 +25,12 @@ import {
   type LocalRegistrationEntry,
 } from "@/lib/offline/materialize";
 import type { OfflineOperation, OfflineVaultSnapshot } from "@/lib/offline/types";
+import type {
+  PatientRosterImportResult,
+  PatientRosterMapping,
+  PatientRosterMetadata,
+  PatientRosterPreview,
+} from "@/lib/offline/patient-roster";
 import type { Analyst, LabData, LabOrder, Patient, ResultValue } from "@/lib/types";
 
 type CurrentUser = { id: string; fullName: string; role: string };
@@ -44,6 +58,15 @@ export type OfflineRepository = {
   }): Promise<string>;
   saveResults(order: LabOrder, results: ResultValue[]): Promise<{ lockVersion: number; results: ResultValue[] }>;
   buildOfflineReport(order: LabOrder, batchId: string): Promise<Blob | null>;
+  previewPatientRoster(file: File): Promise<PatientRosterPreview>;
+  importPatientRoster(input: {
+    file: File;
+    mapping: PatientRosterMapping;
+    estimatedRows?: number;
+    onProgress?(progress: { processed: number; total: number; imported: number; failed: number; phase: "importing" | "activating" }): void;
+  }): Promise<PatientRosterImportResult>;
+  getPatientRosterMetadata(): Promise<PatientRosterMetadata | null>;
+  searchPatients(query: string, limit?: number): Promise<Patient[]>;
   refresh(): Promise<void>;
   requestSync(): void;
 };
@@ -73,6 +96,11 @@ export function OfflineRepositoryProvider(props: {
   refresh(): Promise<void>;
   requestSync(): void;
 }) {
+  useEffect(() => {
+    if (!props.session) return;
+    void cleanupInactivePatientRosters(props.session).catch(() => undefined);
+  }, [props.session]);
+
   const commit = async (nextData: LabData, operation: OfflineOperation) => {
     if (!props.session) throw new Error("offline_vault_locked");
     const snapshot: OfflineVaultSnapshot = {
@@ -300,6 +328,56 @@ export function OfflineRepositoryProvider(props: {
         })),
       }, logo);
       return new Blob([bytes as BlobPart], { type: "application/pdf" });
+    },
+    async previewPatientRoster(file) {
+      if (!props.session) throw new Error("Habilita y desbloquea el modo offline antes de vincular la base local.");
+      return previewPatientRosterFile(file);
+    },
+    async importPatientRoster(input) {
+      if (!props.session) throw new Error("Habilita y desbloquea el modo offline antes de vincular la base local.");
+      const rosterId = crypto.randomUUID();
+      try {
+        await beginPatientRosterImport(props.session, rosterId);
+        const estimate = await navigator.storage?.estimate?.().catch(() => undefined);
+        const available = (estimate?.quota ?? 0) - (estimate?.usage ?? 0);
+        const required = (input.estimatedRows ?? 0) * 400;
+        if (available > 0 && required > available) {
+          throw new Error(`No hay espacio suficiente. Libera al menos ${Math.ceil((required - available) / 1024 / 1024)} MB e inténtalo nuevamente.`);
+        }
+        const result = await streamPatientRosterFile({
+          file: input.file,
+          mapping: input.mapping,
+          onBatch: (patients) => writePatientRosterBatch(props.session!, rosterId, patients),
+          onProgress: (progress) => input.onProgress?.({ ...progress, phase: "importing" }),
+        });
+        input.onProgress?.({
+          processed: result.total,
+          total: result.total,
+          imported: result.imported,
+          failed: result.failed,
+          phase: "activating",
+        });
+        const previousRosterId = await activatePatientRoster(props.session, {
+          rosterId,
+          fileName: input.file.name,
+          sheetName: input.mapping.sheetName,
+          count: result.imported,
+          sourceRows: result.total,
+          importedAt: new Date().toISOString(),
+        });
+        if (previousRosterId) void discardPatientRosterImport(props.session, previousRosterId).catch(() => undefined);
+        return result;
+      } catch (reason) {
+        void discardPatientRosterImport(props.session, rosterId).catch(() => undefined);
+        throw reason;
+      }
+    },
+    async getPatientRosterMetadata() {
+      return props.session ? getPatientRosterMetadata(props.session) : null;
+    },
+    async searchPatients(query, limit = 8) {
+      if (!props.session) return [];
+      return searchPatientRoster(props.session, query, limit);
     },
     refresh: props.refresh,
     requestSync: props.requestSync,

@@ -2,6 +2,10 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function proxy(request: NextRequest) {
+  // Lightweight connectivity probe used by the PWA. It returns no data and
+  // must not trigger a Supabase auth request every ten seconds.
+  if (request.nextUrl.pathname === "/api/sync/ping") return NextResponse.next();
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
