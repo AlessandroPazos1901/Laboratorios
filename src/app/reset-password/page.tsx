@@ -17,7 +17,7 @@ export default function ResetPasswordPage() {
     setMessage("");
     if (password.length < 12) return setMessage("La contraseña debe tener al menos 12 caracteres.");
     if (password !== confirmation) return setMessage("Las contraseñas no coinciden.");
-    if (!isSupabaseConfigured) return setMessage("Supabase todavía no está configurado.");
+    if (!isSupabaseConfigured) return setMessage("El cambio de contraseña aún no está disponible. Comunícate con el administrador.");
     setLoading(true);
     const { error } = await createClient().auth.updateUser({ password });
     setLoading(false);

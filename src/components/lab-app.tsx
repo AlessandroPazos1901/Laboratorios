@@ -1,15 +1,18 @@
 "use client";
 
 import {
-  Activity, ArrowLeft, BarChart3, BookOpenCheck, CalendarDays, Check, ChevronRight, CircleAlert, Droplet,
+  Activity, ArrowLeft, BarChart3, BookOpenCheck, CalendarDays, Check, ChevronRight, CircleAlert,
   ClipboardList, Database, FileClock, FileDown, FlaskConical,
-  Import, KeyRound, LogOut, Menu, Microscope, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Printer, Search,
+  Import, KeyRound, LogOut, Menu, Microscope, PanelLeftClose, PanelLeftOpen, Plus, Search,
   Settings, ShieldCheck, TestTube2, UserRound, Users, X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { buildPickerGroups } from "@/lib/catalog-presets";
-import { expandMillonesText, flagNumericResult, formatNumericResult, formatPatientAgeAt, groupResultsByBatch, linkedHematologyValues } from "@/lib/clinical";
+import { flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, linkedHematologyValues } from "@/lib/clinical";
+import {
+  buildResultPresentationRows, formatResultReference, formatResultUnit, resultDisplayNumber, resultStorageValue,
+} from "@/lib/result-presentation";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { useOfflineRepository } from "@/lib/offline/repository";
 import type { AnalysisDefinition, LabData, LabOrder, ResultValue } from "@/lib/types";
@@ -17,7 +20,7 @@ import type { AnalysisDefinition, LabData, LabOrder, ResultValue } from "@/lib/t
 type View = "trabajo" | "pacientes" | "analitica" | "catalogo" | "configuracion";
 const nav: { id: View; label: string; icon: typeof Activity }[] = [
   { id: "analitica", label: "Analítica", icon: BarChart3 },
-  { id: "trabajo", label: "Trabajo diario", icon: ClipboardList },
+  { id: "trabajo", label: "Resultados", icon: ClipboardList },
   { id: "pacientes", label: "Pacientes", icon: Users },
   { id: "catalogo", label: "Catálogo", icon: TestTube2 },
   { id: "configuracion", label: "Configuración", icon: Settings },
@@ -29,49 +32,46 @@ const fmtBirthDate = (date: string) => date
   : "No registrada";
 const sexLabel = { F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as const;
 const normalizePatientLookup = (value: string) => value.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("es");
-function printPdfInBrowser(blob: Blob) {
-  return new Promise<void>((resolve, reject) => {
-    const reportUrl = URL.createObjectURL(blob);
-    const frame = document.createElement("iframe");
-    frame.className = "browser-print-frame";
-    frame.title = "Informe listo para imprimir";
-    frame.setAttribute("aria-hidden", "true");
-    let finished = false;
-    let fallback = 0;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      window.clearTimeout(fallback);
-      frame.remove();
-      URL.revokeObjectURL(reportUrl);
-      resolve();
-    };
-    const fail = () => {
-      if (finished) return;
-      finished = true;
-      window.clearTimeout(fallback);
-      frame.remove();
-      URL.revokeObjectURL(reportUrl);
-      reject(new Error("print_failed"));
-    };
-    frame.onload = () => {
-      const printWindow = frame.contentWindow;
-      if (!printWindow) return fail();
-      printWindow.addEventListener("afterprint", finish, { once: true });
-      window.setTimeout(() => {
-        try {
-          printWindow.focus();
-          printWindow.print();
-          fallback = window.setTimeout(finish, 5_000);
-        } catch {
-          fail();
-        }
-      }, 250);
-    };
-    frame.onerror = fail;
-    frame.src = reportUrl;
-    document.body.appendChild(frame);
-  });
+function resultGroupEmoji(group: string) {
+  const normalizedGroup = normalizePatientLookup(group);
+  if (normalizedGroup.includes("hemat")) return "🩸";
+  if (normalizedGroup.includes("bioquim")) return "🧪";
+  if (normalizedGroup.includes("inmun")) return "🛡️";
+  if (normalizedGroup.includes("uro")) return "💧";
+  if (normalizedGroup.includes("secrecion")) return "🧫";
+  if (normalizedGroup.includes("parasit") || normalizedGroup.includes("heces")) return "🔬";
+  return "🔬";
+}
+function preparePdfWindow() {
+  const preview = window.open("", "_blank");
+  if (!preview) return null;
+  preview.document.title = "Preparando informe";
+  preview.document.body.textContent = "Generando el informe PDF…";
+  preview.document.body.style.cssText = "margin:0;min-height:100vh;display:grid;place-items:center;font:700 22px Arial,sans-serif;color:#153f46;background:#f4fafb";
+  return preview;
+}
+
+function closePdfWindow(preview: Window | null) {
+  if (preview && !preview.closed) preview.close();
+}
+
+function showPdf(blob: Blob, preview: Window | null, fileName: string) {
+  const reportUrl = URL.createObjectURL(blob);
+  if (preview && !preview.closed) {
+    preview.opener = null;
+    preview.location.replace(reportUrl);
+    window.setTimeout(() => URL.revokeObjectURL(reportUrl), 5 * 60_000);
+    return true;
+  }
+  const link = document.createElement("a");
+  link.href = reportUrl;
+  link.download = fileName;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(reportUrl), 30_000);
+  return false;
 }
 
 export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { fullName: string; role: string } }) {
@@ -102,12 +102,10 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
       }
     };
     void updateConnection();
-    const interval = window.setInterval(() => void updateConnection(), 30_000);
     window.addEventListener("online", updateConnection);
     window.addEventListener("offline", updateConnection);
     return () => {
       mounted = false;
-      window.clearInterval(interval);
       window.removeEventListener("online", updateConnection);
       window.removeEventListener("offline", updateConnection);
     };
@@ -176,7 +174,7 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
               setSelectedId(id);
               setNewRecordOpen(false);
             }}
-          /> : <WorkQueue orders={orders} selectedId={selectedId} setSelectedId={setSelectedId} updateOrder={updateOrder} notify={setNotice} openNewRecord={openNewRecord} />)}
+          /> : <WorkQueue orders={orders} analyses={sourceAnalyses} selectedId={selectedId} setSelectedId={setSelectedId} updateOrder={updateOrder} notify={setNotice} openNewRecord={openNewRecord} />)}
           {view === "pacientes" && <PatientsView patients={sourcePatients} orders={orders} openOrder={openOrder} notify={setNotice} />}
           {view === "analitica" && <AnalyticsView orders={orders} openOrder={openOrder} />}
           {view === "catalogo" && <CatalogView analyses={sourceAnalyses} />}
@@ -192,7 +190,7 @@ function PageHead({ eyebrow, title, text, action }: { eyebrow: string; title: st
 }
 
 function rpcMessage(message: string) {
-  if (message.includes("register_daily_analyses")) return "La base de datos no está actualizada. Aplica la migración de órdenes diarias y vuelve a intentarlo.";
+  if (message.includes("register_daily_analyses")) return "El sistema necesita una actualización. Comunícate con el administrador.";
   if (message.includes("invalid_dni")) return "El DNI debe tener exactamente 8 dígitos.";
   if (message.includes("patient_name_required")) return "Ingresa el nombre completo del paciente.";
   if (message.includes("analyses_required")) return "Selecciona al menos un análisis.";
@@ -209,22 +207,9 @@ function rpcMessage(message: string) {
   if (message.includes("sample_type_required")) return "Indica el tipo de muestra.";
   if (message.includes("invalid_birth_date")) return "La fecha y hora de nacimiento no es válida.";
   if (message.includes("invalid_patient_sex")) return "Selecciona el sexo del paciente.";
-  if (message.includes("update_patient_details")) return "La base de datos no está actualizada. Aplica la migración de edición de pacientes.";
+  if (message.includes("update_patient_details")) return "El sistema necesita una actualización. Comunícate con el administrador.";
   if (message.includes("owner_required")) return "Solo una cuenta administradora puede aprobar el catálogo.";
   return "No se pudo completar la operación. Intenta nuevamente.";
-}
-
-function AnalysisGlyph({ label }: { label: string }) {
-  const normalized = label.toLocaleLowerCase("es");
-  const isBlood = normalized.includes("hemat") || normalized.includes("hemog");
-  const Icon = normalized.includes("orina") || normalized.includes("uro")
-    ? FlaskConical
-    : isBlood
-      ? Droplet
-      : normalized.includes("bio") || normalized.includes("gluc")
-        ? TestTube2
-        : Microscope;
-  return <span className={isBlood ? "analysis-glyph blood" : "analysis-glyph"}><Icon aria-hidden="true" /></span>;
 }
 
 function ResultChoiceField({ id, value, options, disabled, className, label, onChange }: {
@@ -282,7 +267,6 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   const activeAnalysts = analysts.filter((analyst) => analyst.active);
   const [analystId, setAnalystId] = useState(activeAnalysts.length === 1 ? activeAnalysts[0].id : "");
   const [resultValues, setResultValues] = useState<Record<string, string>>({});
-  const [focusedVersionId, setFocusedVersionId] = useState<string | null>(null);
   const groups = useMemo(() => buildPickerGroups(analyses), [analyses]);
   const [selectedGroup, setSelectedGroup] = useState("");
   const [saving, setSaving] = useState(false);
@@ -446,7 +430,12 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           patient,
           occurredAt: new Date(occurredAt).toISOString(),
           analyst,
-          entries: completedAnalyses.map((analysis) => ({ analysis, value: resultValues[analysis.versionId] })),
+          entries: completedAnalyses.map((analysis) => ({
+            analysis,
+            value: analysis.resultType === "numeric"
+              ? resultStorageValue(resultValues[analysis.versionId], analysis.code)
+              : resultValues[analysis.versionId],
+          })),
         });
       } else {
         const orderResult = await createClient().rpc("register_daily_analyses", {
@@ -456,7 +445,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
             analysis_version_id: analysis.versionId,
             analyst_id: analyst.id,
             payload: analysis.resultType === "numeric"
-              ? { numeric_value: Number(resultValues[analysis.versionId]) }
+              ? { numeric_value: Number(resultStorageValue(resultValues[analysis.versionId], analysis.code)) }
               : analysis.resultType === "qualitative"
                 ? { qualitative_value: resultValues[analysis.versionId].trim() }
                 : { text_value: resultValues[analysis.versionId].trim() },
@@ -467,7 +456,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
       }
       if (!newOrderId) throw new Error("order_id_missing");
       onCreated(newOrderId);
-      notify(offlineRepository?.enabled ? "Análisis guardados en este equipo y pendientes de sincronización." : "Análisis y resultados guardados en la orden diaria.");
+      notify(offlineRepository?.enabled ? "Análisis guardados en este equipo. Se enviarán cuando haya internet." : "Análisis y resultados guardados en la orden diaria.");
       if (!offlineRepository) router.refresh();
     } catch (reason) {
       setError(rpcMessage(reason instanceof Error ? reason.message : "No se pudo guardar la orden."));
@@ -516,15 +505,15 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           </nav>
           <p className="entry-group-hint" id="active-group-title">Escribe únicamente los resultados realizados. Usa Tab para avanzar.</p>
           <div className="direct-result-grid">
-            {currentAnalyses.map((analysis) => { const rawValue = resultValues[analysis.versionId] ?? ""; const numericValue = Number(rawValue); const previewFlag = analysis.resultType === "numeric" && rawValue.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, analysis) : "normal"; return <div key={analysis.versionId} className={`direct-result-row ${rawValue.trim() ? "completed" : ""} ${previewFlag !== "normal" ? "outside-range" : ""}`}>
+            {currentAnalyses.map((analysis) => { const rawValue = resultValues[analysis.versionId] ?? ""; const storedValue = resultStorageValue(rawValue, analysis.code); const numericValue = Number(storedValue); const previewFlag = analysis.resultType === "numeric" && rawValue.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, analysis) : "normal"; return <div key={analysis.versionId} className={`direct-result-row ${rawValue.trim() ? "completed" : ""} ${previewFlag !== "normal" ? "outside-range" : ""}`}>
               <label htmlFor={`direct-result-${analysis.versionId}`}><strong>{analysis.name}</strong><small>{analysis.subsection ?? analysis.code}</small></label>
               <div className="direct-result-control">
                 {analysis.qualitativeOptions?.length
                   ? <ResultChoiceField id={`direct-result-${analysis.versionId}`} className="direct-result-input" value={rawValue} options={analysis.qualitativeOptions} onChange={(value) => changeAnalysisResult(analysis, value)} label={`Resultado de ${analysis.name}`} />
-                  : <input id={`direct-result-${analysis.versionId}`} className="direct-result-input" value={analysis.resultType === "numeric" && focusedVersionId !== analysis.versionId ? formatNumericResult(rawValue, analysis.unit) : rawValue} inputMode={analysis.resultType === "numeric" ? "decimal" : "text"} onChange={(event) => changeAnalysisResult(analysis, event.target.value)} onFocus={() => setFocusedVersionId(analysis.versionId)} onBlur={() => setFocusedVersionId(null)} placeholder="—" aria-label={`Resultado de ${analysis.name}`} autoComplete="off" />}
+                  : <input id={`direct-result-${analysis.versionId}`} className="direct-result-input" value={rawValue} inputMode={analysis.resultType === "numeric" ? "decimal" : "text"} onChange={(event) => changeAnalysisResult(analysis, event.target.value)} placeholder="—" aria-label={`Resultado de ${analysis.name}`} autoComplete="off" />}
                 {previewFlag !== "normal" && <small className={`inline-range-warning ${previewFlag}`}><CircleAlert />Fuera de rango</small>}
               </div>
-              <div className="direct-result-meta"><span>{expandMillonesText(analysis.unit) || "Sin unidad"}</span><small>{analysis.reference || "Sin referencia"}</small></div>
+              <div className="direct-result-meta"><span>{formatResultUnit(analysis.unit, analysis.code) || "Sin unidad"}</span><small>{analysis.reference ? formatResultReference(analysis.reference, analysis.unit, analysis.code) : "Sin referencia"}</small></div>
             </div>; })}
             {currentAnalyses.length === 0 && <div className="empty small"><Microscope /><p>No hay análisis activos en este grupo.</p></div>}
           </div>
@@ -543,7 +532,7 @@ function OrderTable({ orders, onSelect }: { orders: LabOrder[]; onSelect: (id: s
   </table></div>;
 }
 
-function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify, openNewRecord }: { orders: LabOrder[]; selectedId: string; setSelectedId: (id: string) => void; updateOrder: (o: LabOrder) => void; notify: (s: string) => void; openNewRecord: () => void }) {
+function WorkQueue({ orders, analyses, selectedId, setSelectedId, updateOrder, notify, openNewRecord }: { orders: LabOrder[]; analyses: AnalysisDefinition[]; selectedId: string; setSelectedId: (id: string) => void; updateOrder: (o: LabOrder) => void; notify: (s: string) => void; openNewRecord: () => void }) {
   const selected = orders.find((o) => o.id === selectedId) ?? orders[0] ?? null;
   const [search, setSearch] = useState("");
   const visible = orders.filter((order) => {
@@ -554,33 +543,57 @@ function WorkQueue({ orders, selectedId, setSelectedId, updateOrder, notify, ope
       .includes(value);
   });
   return <>
-    <PageHead eyebrow="Operación" title="Trabajo diario" text="Registra resultados y continúa rápidamente donde lo dejaste." action={<button className="button primary" onClick={openNewRecord}><Plus />Nuevo análisis</button>} />
+    <PageHead eyebrow="Operación" title="Resultados" text="Registra resultados y continúa rápidamente donde lo dejaste." action={<button className="button primary" onClick={openNewRecord}><Plus />Nuevo análisis</button>} />
     <div className="work-layout">
       <section className="panel order-list">
         <div className="compact-search"><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filtrar por orden, DNI o paciente" aria-label="Filtrar cola por orden, DNI o paciente" /></div>
         <div className="queue">{visible.map((o) => <button key={o.id} className={o.id === selected?.id ? "queue-item selected" : "queue-item"} onClick={() => setSelectedId(o.id)}><span><strong className="mono">{o.code}</strong><b>{o.patientName}</b><small>{o.groups.join(" · ")}</small></span><span><em>{new Date(o.createdAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</em></span></button>)}{visible.length === 0 && <div className="empty small"><ClipboardList /><p>No hay órdenes en esta cola.</p></div>}</div>
       </section>
-      {selected ? <ResultWorkspace key={`${selected.id}:${selected.results.map((result) => result.orderAnalysisId).join(",")}`} order={selected} updateOrder={updateOrder} notify={notify} /> : <section className="panel"><div className="empty"><Microscope /><h3>Sin registros</h3><p>Crea el primero después de cargar el catálogo.</p></div></section>}
+      {selected ? <ResultWorkspace key={`${selected.id}:${selected.results.map((result) => result.orderAnalysisId).join(",")}`} order={selected} analyses={analyses} updateOrder={updateOrder} notify={notify} /> : <section className="panel"><div className="empty"><Microscope /><h3>Sin registros</h3><p>Crea el primero después de cargar el catálogo.</p></div></section>}
     </div>
   </>;
 }
 
-function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; updateOrder: (o: LabOrder) => void; notify: (s: string) => void }) {
+function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabOrder; analyses: AnalysisDefinition[]; updateOrder: (o: LabOrder) => void; notify: (s: string) => void }) {
   const offlineRepository = useOfflineRepository();
   const [draft, setDraft] = useState(order.results);
   const [saving, setSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [editingResultId, setEditingResultId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
   const resultBatches = useMemo(() => groupResultsByBatch(draft, order.createdAt), [draft, order.createdAt]);
   const [selectedBatchId, setSelectedBatchId] = useState(resultBatches[0]?.batchId ?? "");
   const activeBatch = resultBatches.find((item) => item.batchId === selectedBatchId) ?? resultBatches[0];
+  const orderedBatchResults = useMemo(() => {
+    if (!activeBatch) return [];
+    const orderedVersions = buildPickerGroups(analyses).flatMap((group) => group.items.map((analysis) => analysis.versionId));
+    const rankByVersion = new Map(orderedVersions.map((versionId, index) => [versionId, index]));
+    return [...activeBatch.results].sort((left, right) => {
+      const leftRank = left.analysisVersionId ? rankByVersion.get(left.analysisVersionId) : undefined;
+      const rightRank = right.analysisVersionId ? rankByVersion.get(right.analysisVersionId) : undefined;
+      return (leftRank ?? Number.MAX_SAFE_INTEGER) - (rightRank ?? Number.MAX_SAFE_INTEGER)
+        || left.analyte.localeCompare(right.analyte, "es");
+    });
+  }, [activeBatch, analyses]);
+  const presentationRows = useMemo(() => {
+    const analysisByVersion = new Map(analyses.map((analysis) => [analysis.versionId, analysis]));
+    return buildResultPresentationRows(orderedBatchResults.map((result) => ({
+      ...result,
+      analysis: result.analyte,
+      subsection: result.analysisVersionId ? analysisByVersion.get(result.analysisVersionId)?.subsection : undefined,
+    })));
+  }, [analyses, orderedBatchResults]);
+  const activeBatchAnalysts = useMemo(() => [...new Set(activeBatch?.results.map((result) => result.performedBy).filter(Boolean) ?? [])], [activeBatch]);
   const critical = activeBatch?.results.some((result) => result.flag === "critical") ?? false;
 
   function changeResult(id: string, value: string) {
     setDraft((results) => {
       const source = results.find((result) => result.id === id);
       if (!source) return results;
-      const sanitized = sanitizeResultInput(source.resultType, value);
+      const entryValue = sanitizeResultInput(source.resultType, value);
+      const sanitized = source.resultType === "numeric"
+        ? resultStorageValue(entryValue, source.analysisCode)
+        : entryValue;
       const linked = source.resultType === "numeric" && source.analysisCode
         ? linkedHematologyValues(source.analysisCode, sanitized)
         : null;
@@ -596,6 +609,24 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
         return { ...result, value: nextValue, numericValue, flag };
       });
     });
+  }
+
+  function startEditing(result: ResultValue) {
+    if (editingResultId === result.orderAnalysisId) {
+      setEditingResultId(null);
+      setEditingValue("");
+      return;
+    }
+    setEditingResultId(result.orderAnalysisId);
+    setEditingValue(result.resultType === "numeric"
+      ? formatNumericResult(result.value, result.unit, result.analysisCode)
+      : result.value);
+  }
+
+  function changeEditingResult(result: ResultValue, value: string) {
+    const sanitized = sanitizeResultInput(result.resultType, value);
+    setEditingValue(sanitized);
+    changeResult(result.id, sanitized);
   }
 
   async function save() {
@@ -634,6 +665,12 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
       return null;
     }
 
+    if (!entries.length) {
+      setEditingResultId(null);
+      setSaving(false);
+      return order.lockVersion;
+    }
+
     if (offlineRepository) {
       try {
         const saved = await offlineRepository.saveResults(order, savedResults);
@@ -641,7 +678,7 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
         updateOrder({ ...order, results: saved.results, lockVersion: saved.lockVersion, syncState: offlineRepository.enabled ? "pending" : order.syncState });
         setEditingResultId(null);
         setSaving(false);
-        notify(offlineRepository.enabled ? "Resultados protegidos en este equipo; sincronización pendiente." : "Resultados guardados.");
+        notify(offlineRepository.enabled ? "Resultados guardados en este equipo. Se enviarán cuando haya internet." : "Resultados guardados.");
         return saved.lockVersion;
       } catch (reason) {
         setSaving(false);
@@ -681,37 +718,51 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
 
   async function printReport() {
     if (!activeBatch || printing || saving) return;
+    // Open while the click still has user activation. Navigating a window after
+    // awaiting save/PDF generation works in installed PWAs and offline tabs.
+    const preview = preparePdfWindow();
     setPrinting(true);
     try {
       const lockVersion = await save();
-      if (lockVersion === null) return;
+      if (lockVersion === null) {
+        closePdfWindow(preview);
+        return;
+      }
+      let report: Blob;
       if (offlineRepository?.enabled) {
         const blob = await offlineRepository.buildOfflineReport(
           { ...order, results: draft, lockVersion },
           activeBatch.batchId,
         );
         if (!blob) throw new Error("offline_report_unavailable");
-        await printPdfInBrowser(blob);
-        return;
+        report = blob;
+      } else {
+        const legacyBatch = activeBatch.batchId.startsWith("legacy:");
+        const reportResponse = await fetch(`/api/reports/${order.id}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(legacyBatch
+            ? { group: activeBatch.group }
+            : { batchId: activeBatch.batchId }),
+        });
+        if (!reportResponse.ok) {
+          const error = await reportResponse.json().catch(() => null) as { error?: string } | null;
+          closePdfWindow(preview);
+          notify(error?.error ? rpcMessage(error.error) : "No se pudo generar el informe. El registro sigue editable.");
+          return;
+        }
+        report = await reportResponse.blob();
       }
-      const legacyBatch = activeBatch.batchId.startsWith("legacy:");
-      const reportResponse = await fetch(`/api/reports/${order.id}`, {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(legacyBatch
-          ? { group: activeBatch.group }
-          : { batchId: activeBatch.batchId }),
-      });
-      if (!reportResponse.ok) {
-        const error = await reportResponse.json().catch(() => null) as { error?: string } | null;
-        notify(error?.error ? rpcMessage(error.error) : "No se pudo generar el informe. El registro sigue editable.");
-        return;
-      }
-      await printPdfInBrowser(await reportResponse.blob());
+      const safeCode = order.code.replace(/[^a-zA-Z0-9-]+/g, "-").toLowerCase();
+      const opened = showPdf(report, preview, `informe-${safeCode}.pdf`);
+      notify(opened
+        ? "Informe abierto. Usa el botón de imprimir del visor PDF."
+        : "El navegador bloqueó la ventana; el informe se descargó como PDF.");
     } catch {
       setSaving(false);
-      notify("No se pudo abrir el selector de impresión del navegador.");
+      closePdfWindow(preview);
+      notify("No se pudo generar el informe PDF.");
     } finally {
       setPrinting(false);
     }
@@ -730,40 +781,37 @@ function ResultWorkspace({ order, updateOrder, notify }: { order: LabOrder; upda
       </dl>
     </div>
     {order.results.length === 0 ? <div className="empty"><Microscope /><h3>Este registro no tiene análisis</h3><p>Crea un nuevo registro seleccionando al menos un análisis.</p></div> : <>
-      <div className="result-toolbar"><div><h2>Resultados por registro</h2><p>{draft.length} análisis · {resultBatches.length} tandas ordenadas por fecha</p></div></div>
+      <div className="result-toolbar"><div><h2>Resultados por registro</h2><p>{draft.length} análisis · {resultBatches.length} tandas ordenadas por fecha</p></div>{activeBatchAnalysts.length > 0 && <span className="result-toolbar-analyst"><span>Realizado por <strong>{activeBatchAnalysts.join(" · ")}</strong></span></span>}</div>
       <nav className="result-group-menu" aria-label="Tandas realizadas">{resultBatches.map((item) => <button type="button" key={item.batchId} className={item.batchId === activeBatch?.batchId ? "active" : ""} onClick={() => setSelectedBatchId(item.batchId)}>
-        <AnalysisGlyph label={item.group} /><span><strong>{item.group}</strong><small>{fmtDate(item.registeredAt)}</small></span><b>{item.results.length}</b>
+        <span><strong><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(item.group)}</span>{item.group}</strong><small>{fmtDate(item.registeredAt)}</small></span><b>{item.results.length}</b>
       </button>)}</nav>
       {activeBatch && <div className="result-groups"><section className="result-group" aria-labelledby="active-result-group">
-        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group">{activeBatch.group}</h3></div><button className="button secondary" onClick={printReport} disabled={saving || printing} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Preparando impresión…</> : <><Printer />Imprimir esta tanda</>}</button></div>
-        <div className="result-card-list">{activeBatch.results.map((result) => {
-          const editing = editingResultId === result.orderAnalysisId;
-          return <article key={result.id} className={editing ? "result-card editing" : "result-card"}>
-            <header className="result-card-head">
-              <div className="result-card-title"><AnalysisGlyph label={result.group} /><span><strong>{result.analyte}</strong><small>{result.method || "Método por definir"}</small></span></div>
-              <button type="button" className={editing ? "result-edit-button active" : "result-edit-button"} onClick={() => setEditingResultId(editing ? null : result.orderAnalysisId)} aria-pressed={editing}>{editing ? <Check /> : <Pencil />}{editing ? "Terminar edición" : "Editar resultado"}</button>
-            </header>
-            <div className="result-card-body">
-              <label className="result-value-field"><span>Resultado</span>{result.qualitativeOptions?.length
-                ? <ResultChoiceField id={result.id} className={`result-input ${result.flag}`} value={result.value} options={result.qualitativeOptions} disabled={!editing} onChange={(value) => changeResult(result.id, value)} label={`Resultado de ${result.analyte}`} />
-                : <input className={`result-input ${result.flag}`} value={!editing && result.resultType === "numeric" ? formatNumericResult(result.value, result.unit) : result.value} inputMode={result.resultType === "numeric" ? "decimal" : undefined} disabled={!editing} onChange={(event) => changeResult(result.id, event.target.value)} aria-label={`Resultado de ${result.analyte}`} />}</label>
-              <div className="result-fact"><span>Unidad</span><strong className="mono">{expandMillonesText(result.unit) || "—"}</strong></div>
-              <div className="result-fact reference"><span>Rango de referencia</span><strong>{result.reference || "No definido"}</strong></div>
-              <div className="result-fact flag-fact"><span>Evaluación</span><ResultFlag flag={result.flag} /></div>
-            </div>
-            <footer className="result-card-foot"><span><Users />Realizado por <strong>{result.performedBy}</strong></span>{editing && <small>Modifica el valor y pulsa «Terminar edición».</small>}</footer>
-          </article>;
-        })}</div>
+        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><button className="button secondary" onClick={printReport} disabled={saving || printing} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : "Ver e imprimir informe"}</button></div>
+        <div className="clinical-results-wrap"><table className="clinical-results-table">
+          <thead><tr><th>Examen</th><th>Resultado</th><th>Unidad</th><th>Valores normales</th><th aria-label="Acciones" /></tr></thead>
+          <tbody>{presentationRows.map((row, index) => {
+            if (row.kind === "section") return <tr className="clinical-section-row" key={`section-${row.label}-${index}`}><th colSpan={5}>{row.label}</th></tr>;
+            const result = row.result;
+            const editing = editingResultId === result.orderAnalysisId;
+            const alertLabel = result.flag === "low" ? "Bajo" : result.flag === "high" ? "Alto" : result.flag === "critical" ? "Crítico" : null;
+            return <tr key={result.orderAnalysisId} className={`clinical-result-row ${result.flag} ${editing ? "editing" : ""}`}>
+              <td style={{ paddingLeft: `${14 + row.indent * 18}px` }}><strong>{result.analyte}</strong></td>
+              <td className="clinical-result-value">{editing
+                ? result.qualitativeOptions?.length
+                  ? <ResultChoiceField id={result.id} className={`result-input ${result.flag}`} value={editingValue} options={result.qualitativeOptions} onChange={(value) => changeEditingResult(result, value)} label={`Resultado de ${result.analyte}`} />
+                  : <input autoFocus className={`result-input ${result.flag}`} value={editingValue} inputMode={result.resultType === "numeric" ? "decimal" : undefined} onChange={(event) => changeEditingResult(result, event.target.value)} aria-label={`Resultado de ${result.analyte}`} />
+                : <span className="clinical-result-reading"><strong>{result.resultType === "numeric" ? formatNumericResult(result.value, result.unit, result.analysisCode) : result.value}</strong>{alertLabel && <small className="clinical-result-alert">{alertLabel}</small>}</span>}</td>
+              <td className="clinical-result-unit">{formatResultUnit(result.unit, result.analysisCode) || ""}</td>
+              <td className="clinical-result-reference">{result.reference ? formatResultReference(result.reference, result.unit, result.analysisCode) : ""}</td>
+              <td className="clinical-result-action"><button type="button" className={editing ? "result-edit-button active" : "result-edit-button"} onClick={() => startEditing(result)} aria-pressed={editing}>{editing ? "Listo" : "Editar"}</button></td>
+            </tr>;
+          })}</tbody>
+        </table></div>
       </section></div>}
-      {critical && <div className="critical-notice"><CircleAlert /><span><strong>Hay un valor crítico</strong><small>Revísalo antes de imprimir. Esta advertencia no bloquea el registro.</small></span></div>}
-      <div className="action-bar"><span><ShieldCheck />Los resultados pueden editarse cuando sea necesario.</span><div><button className="button primary" onClick={save} disabled={saving}>{saving ? "Guardando…" : "Guardar resultados"}</button></div></div>
+      {critical && <div className="critical-notice"><span><strong>Hay un valor crítico</strong><small>Revísalo antes de imprimir. Esta advertencia no bloquea el registro.</small></span></div>}
+      <div className="action-bar"><span>Los resultados pueden editarse cuando sea necesario.</span><div><button className="button primary" onClick={save} disabled={saving}>{saving ? "Guardando…" : "Guardar resultados"}</button></div></div>
     </>}
   </section>;
-}
-
-function ResultFlag({ flag }: { flag: ResultValue["flag"] }) {
-  const label = { normal: "Normal", low: "Bajo", high: "Alto", critical: "Crítico", unreviewed: "No evaluado" }[flag];
-  return <span className={`flag ${flag}`}>{!["normal", "unreviewed"].includes(flag) && <CircleAlert />}{label}</span>;
 }
 
 function AddPatientDialog({ close, notify }: { close: () => void; notify: (message: string) => void }) {
@@ -786,7 +834,7 @@ function AddPatientDialog({ close, notify }: { close: () => void; notify: (messa
         const response = await createClient().rpc("upsert_simple_patient", { patient_dni: dni, patient_name: name.trim() });
         if (response.error) throw response.error;
       }
-      notify(offlineRepository?.enabled ? "Paciente guardado en este equipo; sincronización pendiente." : "Paciente agregado correctamente.");
+      notify(offlineRepository?.enabled ? "Paciente guardado en este equipo. Se enviará cuando haya internet." : "Paciente agregado correctamente.");
       close();
       if (!offlineRepository) router.refresh();
     } catch (reason) {
@@ -849,7 +897,7 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
     setProgress(null);
     setError("");
     if (!nextFile) return;
-    if (!offlineRepository?.enabled) return setError("Primero habilita y desbloquea el modo offline en este equipo.");
+    if (!offlineRepository?.enabled) return setError("Primero prepara este equipo para trabajar sin internet y luego ingresa tu PIN.");
     if (!/\.(xlsb|xlsx|xlsm|xls)$/i.test(nextFile.name)) return setError("Selecciona un archivo XLSB, XLSX, XLSM o XLS.");
     if (nextFile.size > 200 * 1024 * 1024) return setError("El archivo supera el límite de 200 MB.");
     setLoading(true);
@@ -867,7 +915,7 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
   }
 
   async function importPatients() {
-    if (!offlineRepository?.enabled || !file || !activeSheet) return setError("El modo offline debe estar desbloqueado.");
+    if (!offlineRepository?.enabled || !file || !activeSheet) return setError("Primero abre los datos de este equipo con tu PIN.");
     const columns = [dniColumn, nameColumn, birthDateColumn, sexColumn];
     if (columns.some((column) => !column) || new Set(columns).size !== columns.length) {
       return setError("Mapea cuatro columnas diferentes: DNI, nombre completo, nacimiento y sexo.");
@@ -883,9 +931,9 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
         onProgress: setProgress,
       });
       setResult(data);
-      notify(`${data.imported.toLocaleString("es-PE")} pacientes disponibles para búsqueda offline.`);
+      notify(`${data.imported.toLocaleString("es-PE")} pacientes disponibles para buscar con o sin internet.`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "No se pudo crear la base local.");
+      setError(reason instanceof Error ? reason.message : "No se pudieron guardar los pacientes en este equipo.");
     } finally {
       setLoading(false);
     }
@@ -898,8 +946,8 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
   const columnOptions = activeSheet?.headers.map((header, index) => <option value={index + 1} key={`${header}-${index}`}>{header || `Columna ${index + 1}`}</option>);
   return <div className="dialog-backdrop" role="presentation">
     <section className="dialog-card patient-import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-patients-title">
-      <div className="import-dialog-head"><div><p className="eyebrow">Directorio local</p><h2 id="import-patients-title">Vincular base de pacientes</h2><p>El archivo se procesa en este equipo y no se envía a Supabase.</p></div><button className="icon-button" type="button" onClick={close} aria-label="Cerrar" disabled={loading}><X /></button></div>
-      <div className="import-steps" aria-label="Progreso"><span className={step >= 1 ? "active" : ""}><b>1</b>Archivo</span><span className={step >= 2 ? "active" : ""}><b>2</b>Mapeo</span><span className={step >= 3 ? "active" : ""}><b>3</b>Resultado</span></div>
+      <div className="import-dialog-head"><div><p className="eyebrow">Pacientes disponibles</p><h2 id="import-patients-title">Cargar archivo de pacientes</h2><p>El archivo se prepara y queda guardado solamente en esta computadora.</p></div><button className="icon-button" type="button" onClick={close} aria-label="Cerrar" disabled={loading}><X /></button></div>
+      <div className="import-steps" aria-label="Progreso"><span className={step >= 1 ? "active" : ""}><b>1</b>Archivo</span><span className={step >= 2 ? "active" : ""}><b>2</b>Columnas</span><span className={step >= 3 ? "active" : ""}><b>3</b>Finalizado</span></div>
       <div className="patient-import-body">
         {!preview && !result && <div className="import-dropzone"><Import /><h3>Selecciona el archivo de pacientes</h3><p>XLSB, XLSX, XLSM o XLS · máximo 200 MB · primera fila con encabezados.</p><label className="button primary file-button">Elegir Excel<input type="file" accept=".xlsb,.xlsx,.xlsm,.xls" onChange={(event) => selectFile(event.target.files?.[0] ?? null)} /></label>{file && <small>{file.name}</small>}{loading && <div className="import-progress"><i /><span>Analizando el archivo en este equipo...</span></div>}</div>}
         {preview && !result && activeSheet && <>
@@ -913,13 +961,13 @@ function PatientImportDialog({ close, notify }: { close: () => void; notify: (me
             <label>Sexo (M/F)<select value={sexColumn} onChange={(event) => setSexColumn(Number(event.target.value))}><option value={0}>Seleccionar...</option>{columnOptions}</select></label>
           </div>
           <div className="import-preview-table table-wrap"><table><thead><tr><th>Fila</th><th>DNI</th><th>Nombre completo</th><th>Nacimiento</th><th>Sexo</th></tr></thead><tbody>{activeSheet.sampleRows.map((row, index) => <tr key={index}><td>{index + 2}</td><td className="mono">{dniColumn ? row[dniColumn - 1] || "—" : "Selecciona"}</td><td>{nameColumn ? row[nameColumn - 1] || "—" : "Selecciona"}</td><td>{birthDateColumn ? row[birthDateColumn - 1] || "—" : "Selecciona"}</td><td>{sexColumn ? row[sexColumn - 1] || "—" : "Selecciona"}</td></tr>)}</tbody></table></div>
-          <p className="compat-note"><ShieldCheck />La base quedará disponible en este equipo. Solo los pacientes utilizados en un análisis se sincronizarán con Supabase.</p>
-          {loading && progress && <div className="roster-import-progress"><div><i style={{ width: `${percent}%` }} /></div>{progress.phase === "activating" ? <p><strong>Activando la base local…</strong> Este último paso puede tardar unos segundos.</p> : <p><strong>{percent}%</strong> · {progress.processed.toLocaleString("es-PE")} de {progress.total.toLocaleString("es-PE")} filas · {progress.imported.toLocaleString("es-PE")} únicas</p>}</div>}
+          <p className="compat-note"><ShieldCheck />Estos pacientes podrán buscarse con o sin internet. Al registrar un análisis, sus datos se enviarán cuando haya conexión.</p>
+          {loading && progress && <div className="roster-import-progress"><div><i style={{ width: `${percent}%` }} /></div>{progress.phase === "activating" ? <p><strong>Terminando de preparar los pacientes…</strong> Este último paso puede tardar unos segundos.</p> : <p><strong>{percent}%</strong> · {progress.processed.toLocaleString("es-PE")} de {progress.total.toLocaleString("es-PE")} filas · {progress.imported.toLocaleString("es-PE")} únicas</p>}</div>}
         </>}
-        {result && <div className="import-result"><span className="import-result-icon"><Check /></span><h3>Base local preparada</h3><p>{result.imported.toLocaleString("es-PE")} pacientes únicos ya se pueden buscar sin internet.</p><div><span><strong>{result.total.toLocaleString("es-PE")}</strong> procesados</span><span><strong>{result.failed.toLocaleString("es-PE")}</strong> filas inválidas</span><span><strong>{result.duplicates.toLocaleString("es-PE")}</strong> duplicados ignorados</span></div>{result.failures.length > 0 && <div className="import-failures"><strong>Filas inválidas que requieren revisión</strong>{result.failures.slice(0, 8).map((failure) => <p key={`${failure.row}-${failure.reason}`}><b>Fila {failure.row}</b>{failure.reason}</p>)}</div>}</div>}
+        {result && <div className="import-result"><span className="import-result-icon"><Check /></span><h3>Pacientes preparados</h3><p>{result.imported.toLocaleString("es-PE")} pacientes únicos ya se pueden buscar con o sin internet.</p><div><span><strong>{result.total.toLocaleString("es-PE")}</strong> revisados</span><span><strong>{result.failed.toLocaleString("es-PE")}</strong> filas inválidas</span><span><strong>{result.duplicates.toLocaleString("es-PE")}</strong> duplicados ignorados</span></div>{result.failures.length > 0 && <div className="import-failures"><strong>Filas inválidas que requieren revisión</strong>{result.failures.slice(0, 8).map((failure) => <p key={`${failure.row}-${failure.reason}`}><b>Fila {failure.row}</b>{failure.reason}</p>)}</div>}</div>}
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
-      <div className="import-dialog-actions"><span>{preview && !result ? "Comprueba las cuatro columnas antes de crear el índice local." : "La base completa permanece únicamente en este equipo."}</span><div><button className="button secondary" type="button" onClick={close} disabled={loading}>{result ? "Cerrar" : "Cancelar"}</button>{preview && !result && <button className="button primary" type="button" disabled={loading || !validMapping} onClick={importPatients}>{loading ? progress?.phase === "activating" ? "Activando…" : `Preparando ${percent}%` : "Crear base local"}</button>}</div></div>
+      <div className="import-dialog-actions"><span>{preview && !result ? "Comprueba las cuatro columnas antes de guardar los pacientes." : "El archivo completo permanece únicamente en este equipo."}</span><div><button className="button secondary" type="button" onClick={close} disabled={loading}>{result ? "Cerrar" : "Cancelar"}</button>{preview && !result && <button className="button primary" type="button" disabled={loading || !validMapping} onClick={importPatients}>{loading ? progress?.phase === "activating" ? "Terminando…" : `Preparando ${percent}%` : "Guardar pacientes"}</button>}</div></div>
     </section>
   </div>;
 }
@@ -959,7 +1007,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
         });
         if (response.error) throw response.error;
       }
-      notify(offlineRepository?.enabled ? "Paciente actualizado localmente; sincronización pendiente." : "Datos del paciente actualizados.");
+      notify(offlineRepository?.enabled ? "Paciente actualizado en este equipo. El cambio se enviará cuando haya internet." : "Datos del paciente actualizados.");
       close();
       if (!offlineRepository) router.refresh();
     } catch (reason) {
@@ -1000,19 +1048,19 @@ function PatientsView({ patients, orders, openOrder, notify }: { patients: LabDa
   });
   const selected = visiblePatients.find((patient) => patient.id === selectedId) ?? visiblePatients[0] ?? null;
   const localRosterLocked = Boolean(offlineRepository && !offlineRepository.enabled);
-  const patientActions = <div className="patient-page-actions"><button className="button secondary" disabled={localRosterLocked} title={localRosterLocked ? "Habilita y desbloquea el modo offline para guardar la base cifrada" : "Crear o reemplazar el directorio local de pacientes"} onClick={() => setImporting(true)}><Database />Base local</button><button className="button primary" onClick={() => setAdding(true)}><Plus />Agregar paciente</button></div>;
+  const patientActions = <div className="patient-page-actions"><button className="button secondary" disabled={localRosterLocked} title={localRosterLocked ? "Primero prepara este equipo para trabajar sin internet y luego ingresa tu PIN" : "Cargar o reemplazar el archivo de pacientes de este equipo"} onClick={() => setImporting(true)}><Database />Cargar pacientes</button><button className="button primary" onClick={() => setAdding(true)}><Plus />Agregar paciente</button></div>;
   if (!selected) return <><PageHead eyebrow="Registro maestro" title="Pacientes" text="Identidad única e historial de análisis." action={patientActions} /><article className="panel"><div className="empty"><Users /><h3>No hay pacientes registrados</h3><p>Agrega el primer paciente por DNI para comenzar.</p><button className="button primary" onClick={() => setAdding(true)}>Agregar paciente</button></div></article>{adding && <AddPatientDialog close={() => setAdding(false)} notify={notify} />}{importing && <PatientImportDialog close={() => setImporting(false)} notify={notify} />}</>;
   const patientOrders = orders.filter((order) => order.patientId === selected.id);
   const patientResults = patientOrders.flatMap((order) => order.results.map((result) => ({ order, result })))
     .sort((left, right) => right.order.createdAt.localeCompare(left.order.createdAt));
   const numericSeries = [...patientResults.reduce((series, entry) => {
     if (entry.result.resultType !== "numeric" || entry.result.numericValue === undefined || !Number.isFinite(entry.result.numericValue)) return series;
-    const key = `${entry.result.analyte}|${entry.result.unit}|${entry.result.method}`;
-    const current = series.get(key) ?? { key, label: entry.result.analyte, unit: entry.result.unit, method: entry.result.method, points: [] as LabData["trend"] };
-    current.points.push({ date: new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short", year: "2-digit" }).format(new Date(entry.order.createdAt)), value: entry.result.numericValue });
+    const key = `${entry.result.analysisCode ?? entry.result.analyte}|${entry.result.unit}|${entry.result.method}`;
+    const current = series.get(key) ?? { key, label: entry.result.analyte, analysisCode: entry.result.analysisCode, unit: entry.result.unit, method: entry.result.method, points: [] as LabData["trend"] };
+    current.points.push({ date: new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short", year: "2-digit" }).format(new Date(entry.order.createdAt)), value: resultDisplayNumber(entry.result.numericValue, entry.result.analysisCode) });
     series.set(key, current);
     return series;
-  }, new Map<string, { key: string; label: string; unit: string; method: string; points: LabData["trend"] }>()).values()]
+  }, new Map<string, { key: string; label: string; analysisCode?: string; unit: string; method: string; points: LabData["trend"] }>()).values()]
     .map((series) => ({ ...series, points: [...series.points].reverse() }))
     .sort((left, right) => left.label.localeCompare(right.label, "es"));
   const activeSeries = numericSeries.find((series) => series.key === selectedSeriesKey) ?? numericSeries[0] ?? null;
@@ -1023,8 +1071,8 @@ function PatientsView({ patients, orders, openOrder, notify }: { patients: LabDa
       <section className="panel patient-list"><div className="compact-search"><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="DNI o nombre…" aria-label="Buscar paciente por DNI o nombre" /></div>{visiblePatients.map((p) => <button key={p.id} className={selected.id === p.id ? "patient-row active" : "patient-row"} onClick={() => setSelectedId(p.id)}><span className="avatar patient">{p.fullName.split(" ").slice(0, 2).map((x) => x[0]).join("")}</span><span><strong>{p.fullName}</strong><small className="mono">DNI {p.documentNumber}</small></span><ChevronRight /></button>)}</section>
       <section className="patient-detail">
         <article className="panel profile-panel"><div><span className="avatar patient large">{selected.fullName.split(" ").slice(0, 2).map((x) => x[0]).join("")}</span><span><p className="eyebrow">Paciente activo</p><h2>{selected.fullName}</h2><p className="mono">DNI {selected.documentNumber}</p></span></div><button className="button secondary" onClick={() => setEditing(true)}>Editar datos</button><dl><div><dt>Edad</dt><dd>{age}</dd></div><div><dt>Sexo</dt><dd>{{ F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" }[selected.sex]}</dd></div><div><dt>Nacimiento</dt><dd>{selected.birthDate ? fmtBirthDate(selected.birthDate) : "No registrado"}</dd></div></dl></article>
-        <article className="panel"><div className="panel-head patient-trend-head"><div><h2>Evolución de resultados</h2><p>Series compatibles por unidad y método</p></div>{numericSeries.length > 0 && <label>Análisis<select value={activeSeries?.key ?? ""} onChange={(event) => setSelectedSeriesKey(event.target.value)}>{numericSeries.map((series) => <option key={series.key} value={series.key}>{series.label}{series.unit ? ` (${expandMillonesText(series.unit)})` : ""}</option>)}</select></label>}</div>{activeSeries ? <><TrendChart points={activeSeries.points} /><div className="compat-note"><ShieldCheck />{activeSeries.label} · {expandMillonesText(activeSeries.unit) || "sin unidad"} · {activeSeries.method || "método no registrado"}</div></> : <div className="empty small"><BarChart3 /><p>Aún no hay resultados numéricos para graficar.</p></div>}</article>
-        <article className="panel"><div className="panel-head"><div><h2>Historial de resultados</h2><p>{patientResults.length} resultados registrados</p></div></div>{patientResults.length ? <div className="table-wrap patient-results-table"><table><thead><tr><th>Fecha</th><th>Análisis</th><th>Resultado</th><th>Grupo</th><th>Orden</th></tr></thead><tbody>{patientResults.map(({ order, result }) => <tr key={`${order.id}-${result.orderAnalysisId}`}><td>{fmtDate(order.createdAt)}</td><td><strong>{result.analyte}</strong><small className="block">{result.method || "Método no registrado"}</small></td><td className="mono"><strong>{formatNumericResult(result.value, result.unit) || "Pendiente"}</strong>{result.unit ? ` ${expandMillonesText(result.unit)}` : ""}</td><td>{result.group}</td><td><button className="table-link" type="button" onClick={() => openOrder(order.id)}>{order.code}</button></td></tr>)}</tbody></table></div> : <div className="empty small"><TestTube2 /><p>Este paciente todavía no tiene resultados.</p></div>}</article>
+        <article className="panel"><div className="panel-head patient-trend-head"><div><h2>Evolución de resultados</h2><p>Series compatibles por unidad y método</p></div>{numericSeries.length > 0 && <label>Análisis<select value={activeSeries?.key ?? ""} onChange={(event) => setSelectedSeriesKey(event.target.value)}>{numericSeries.map((series) => <option key={series.key} value={series.key}>{series.label}{series.unit ? ` (${formatResultUnit(series.unit, series.analysisCode)})` : ""}</option>)}</select></label>}</div>{activeSeries ? <><TrendChart points={activeSeries.points} /><div className="compat-note"><ShieldCheck />{activeSeries.label} · {formatResultUnit(activeSeries.unit, activeSeries.analysisCode) || "sin unidad"} · {activeSeries.method || "método no registrado"}</div></> : <div className="empty small"><BarChart3 /><p>Aún no hay resultados numéricos para graficar.</p></div>}</article>
+        <article className="panel"><div className="panel-head"><div><h2>Historial de resultados</h2><p>{patientResults.length} resultados registrados</p></div></div>{patientResults.length ? <div className="table-wrap patient-results-table"><table><thead><tr><th>Fecha</th><th>Análisis</th><th>Resultado</th><th>Grupo</th><th>Orden</th></tr></thead><tbody>{patientResults.map(({ order, result }) => <tr key={`${order.id}-${result.orderAnalysisId}`}><td>{fmtDate(order.createdAt)}</td><td><strong>{result.analyte}</strong><small className="block">{result.method || "Método no registrado"}</small></td><td className="mono"><strong>{formatNumericResult(result.value, result.unit, result.analysisCode) || "Pendiente"}</strong>{result.unit ? ` ${formatResultUnit(result.unit, result.analysisCode)}` : ""}</td><td>{result.group}</td><td><button className="table-link" type="button" onClick={() => openOrder(order.id)}>{order.code}</button></td></tr>)}</tbody></table></div> : <div className="empty small"><TestTube2 /><p>Este paciente todavía no tiene resultados.</p></div>}</article>
         <article className="panel"><div className="panel-head"><div><h2>Historial de órdenes</h2><p>{patientOrders.length} registros encontrados</p></div></div>{patientOrders.length ? <OrderTable orders={patientOrders} onSelect={openOrder} /> : <div className="empty small"><ClipboardList /><p>Sin órdenes en el periodo actual.</p></div>}</article>
       </section>
     </div>
@@ -1236,7 +1284,7 @@ function CatalogView({ analyses }: { analyses: LabData["analyses"] }) {
   return <>
     <PageHead eyebrow="Gobierno clínico" title="Catálogo de análisis" text="Los elementos importados deben revisarse antes de usarse en una orden." />
     <div className="catalog-summary"><span><FlaskConical /><strong>{analyses.length - archived}</strong> análisis activos</span><span><Database /><strong>{groups.size}</strong> grupos</span><span><BookOpenCheck /><strong>{archived}</strong> por revisar</span></div>
-    <article className="panel"><div className="table-actions"><div className="compact-search"><Search /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Buscar código o análisis…" aria-label="Buscar en el catálogo" /></div><select value={group} onChange={(event) => { setGroup(event.target.value); setPage(1); }} aria-label="Filtrar catálogo por grupo"><option value="">Todos los grupos</option>{[...groups].sort().map((name) => <option key={name}>{name}</option>)}</select></div><div className="table-wrap"><table><thead><tr><th>Código</th><th>Análisis</th><th>Grupo</th><th>Tipo</th><th>Unidad</th><th>Método</th><th>Referencia</th><th>Estado</th><th /></tr></thead><tbody>{pagedAnalyses.map((a) => <tr key={a.id}><td className="mono strong">{a.code}</td><td><strong>{a.name}</strong></td><td>{a.group}</td><td>{a.active ? (a.resultType === "numeric" ? "Numérico" : a.resultType === "qualitative" ? "Cualitativo" : "Texto") : "Por definir"}</td><td className="mono">{a.unit || "—"}</td><td>{a.method || "—"}</td><td className="mono">{a.active ? a.reference : "Pendiente"}</td><td><span className={`status ${a.active ? "validated" : "pending_validation"}`}>{a.active ? "Activo" : "Revisión pendiente"}</span></td><td><button className="text-button" onClick={() => setSelected(a)}>{a.active ? "Nueva versión" : "Revisar"} <ChevronRight /></button></td></tr>)}</tbody></table></div><footer className="catalog-pagination"><span>Mostrando {visible.length ? (currentPage - 1) * 20 + 1 : 0}–{Math.min(currentPage * 20, visible.length)} de {visible.length}</span><div><button type="button" className="button secondary" disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ArrowLeft />Atrás</button><strong>Página {currentPage} de {pageCount}</strong><button type="button" className="button secondary" disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Siguiente<ChevronRight /></button></div></footer></article>
+    <article className="panel"><div className="table-actions"><div className="compact-search"><Search /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Buscar código o análisis…" aria-label="Buscar en el catálogo" /></div><select value={group} onChange={(event) => { setGroup(event.target.value); setPage(1); }} aria-label="Filtrar catálogo por grupo"><option value="">Todos los grupos</option>{[...groups].sort().map((name) => <option key={name}>{name}</option>)}</select></div><div className="table-wrap"><table><thead><tr><th>Código</th><th>Análisis</th><th>Grupo</th><th>Tipo</th><th>Unidad</th><th>Método</th><th>Referencia</th><th>Estado</th><th /></tr></thead><tbody>{pagedAnalyses.map((a) => <tr key={a.id}><td className="mono strong">{a.code}</td><td><strong>{a.name}</strong></td><td>{a.group}</td><td>{a.active ? (a.resultType === "numeric" ? "Numérico" : a.resultType === "qualitative" ? "Cualitativo" : "Texto") : "Por definir"}</td><td className="mono">{a.unit || "—"}</td><td>{a.method || "—"}</td><td className="mono">{a.active ? formatReferenceRange(a.reference) : "Pendiente"}</td><td><span className={`status ${a.active ? "validated" : "pending_validation"}`}>{a.active ? "Activo" : "Revisión pendiente"}</span></td><td><button className="text-button" onClick={() => setSelected(a)}>{a.active ? "Nueva versión" : "Revisar"} <ChevronRight /></button></td></tr>)}</tbody></table></div><footer className="catalog-pagination"><span>Mostrando {visible.length ? (currentPage - 1) * 20 + 1 : 0}–{Math.min(currentPage * 20, visible.length)} de {visible.length}</span><div><button type="button" className="button secondary" disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ArrowLeft />Atrás</button><strong>Página {currentPage} de {pageCount}</strong><button type="button" className="button secondary" disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Siguiente<ChevronRight /></button></div></footer></article>
     {selected && <CatalogApprovalDialog analysis={selected} close={() => setSelected(null)} />}
   </>;
 }

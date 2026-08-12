@@ -3,7 +3,10 @@ import {
   popGraphicsState, pushGraphicsState, setLineWidth, setStrokingColor, StandardFonts, stroke, rgb,
 } from "pdf-lib";
 import { canonicalAnalysisOrder, canonicalGroupOrder } from "@/lib/catalog-order";
-import { expandMillonesText, formatNumericResult } from "@/lib/clinical";
+import { formatNumericResult } from "@/lib/clinical";
+import {
+  buildResultPresentationRows, formatResultReference, formatResultUnit, type ResultPresentationRow,
+} from "@/lib/result-presentation";
 
 const LETTER: [number, number] = [612, 792];
 const MARGIN = 42;
@@ -12,11 +15,15 @@ const INK = rgb(0.08, 0.16, 0.25);
 const MUTED = rgb(0.37, 0.43, 0.48);
 const CRITICAL = rgb(0.70, 0.14, 0.17);
 const TABLE_HEADER = rgb(0.84, 0.84, 0.84);
-const TABLE_COLUMNS = [MARGIN, MARGIN + 235, MARGIN + 385, MARGIN + CONTENT_WIDTH] as const;
+const GROUP_HEADER = rgb(0.90, 0.95, 0.95);
+const SECTION_HEADER = rgb(0.94, 0.96, 0.96);
+const TABLE_COLUMNS = [MARGIN, MARGIN + 230, MARGIN + 340, MARGIN + 415, MARGIN + CONTENT_WIDTH] as const;
 
 export type LabReportResult = {
   group: string;
+  analysisCode?: string;
   analysis: string;
+  subsection?: string;
   value: string;
   unit: string;
   reference: string;
@@ -24,6 +31,8 @@ export type LabReportResult = {
   groupOrder?: number;
   analysisOrder?: number;
 };
+
+export type LabReportTableRow = ResultPresentationRow<LabReportResult>;
 
 export type LabReportData = {
   orderNumber: number;
@@ -41,6 +50,18 @@ export type LabReportData = {
 const clean = (value: unknown) => String(value ?? "")
   .replace(/[–—]/g, "-")
   .replace(/[^ -~ -ÿ\n]/g, "-");
+
+export function buildReportTableRows(results: LabReportResult[]): LabReportTableRow[] {
+  return buildResultPresentationRows(results);
+}
+
+export function formatReportUnit(unit: string, analysisCode?: string) {
+  return formatResultUnit(unit, analysisCode);
+}
+
+export function formatReportReference(reference: string, unit: string, analysisCode?: string) {
+  return formatResultReference(reference, unit, analysisCode);
+}
 
 function splitText(text: string, font: PDFFont, size: number, maxWidth: number) {
   const output: string[] = [];
@@ -104,18 +125,19 @@ function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, b
   });
 }
 
-function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: number) {
-  const titleHeight = 24;
-  const columnHeight = 22;
+function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: number, continuation = false) {
+  const titleHeight = 25;
+  const columnHeight = 24;
   const bottom = top - titleHeight - columnHeight;
   page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: columnHeight, color: TABLE_HEADER });
+  page.drawRectangle({ x: MARGIN, y: top - titleHeight, width: CONTENT_WIDTH, height: titleHeight, color: GROUP_HEADER });
   page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: titleHeight + columnHeight, borderColor: INK, borderWidth: 0.8 });
   page.drawLine({ start: { x: MARGIN, y: top - titleHeight }, end: { x: MARGIN + CONTENT_WIDTH, y: top - titleHeight }, thickness: 0.8, color: INK });
   TABLE_COLUMNS.slice(1, -1).forEach((x) => page.drawLine({
     start: { x, y: bottom }, end: { x, y: top - titleHeight }, thickness: 0.8, color: INK,
   }));
 
-  const title = clean(group).toUpperCase();
+  const title = clean(`${group}${continuation ? " - CONTINUACION" : ""}`).toUpperCase();
   page.drawText(title, {
     x: MARGIN + (CONTENT_WIDTH - bold.widthOfTextAtSize(title, 10)) / 2,
     y: top - 16,
@@ -123,7 +145,7 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
     font: bold,
     color: INK,
   });
-  const headers = ["ANALISIS", "RESULTADOS", "VALORES REFERENCIA"];
+  const headers = ["EXAMENES SOLICITADOS", "RESULTADOS", "UNIDAD", "V. NORMALES"];
   headers.forEach((label, index) => {
     const left = TABLE_COLUMNS[index];
     const width = TABLE_COLUMNS[index + 1] - left;
@@ -135,7 +157,42 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
       color: INK,
     });
   });
-  return bottom - 15;
+  return bottom;
+}
+
+function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont) {
+  if (row.kind === "section") {
+    const lines = splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12);
+    return Math.max(22, lines.length * 10 + 8);
+  }
+  const analysisWidth = TABLE_COLUMNS[1] - TABLE_COLUMNS[0] - 10 - row.indent * 13;
+  const analysisLines = splitText(row.result.analysis, regular, 8.5, analysisWidth);
+  const resultLines = splitText(formatNumericResult(row.result.value, row.result.unit, row.result.analysisCode) || "-", bold, 8.5, TABLE_COLUMNS[2] - TABLE_COLUMNS[1] - 8);
+  const unitLines = splitText(formatReportUnit(row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[3] - TABLE_COLUMNS[2] - 8);
+  const referenceLines = splitText(formatReportReference(row.result.reference, row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[4] - TABLE_COLUMNS[3] - 8);
+  return Math.max(22, Math.max(analysisLines.length, resultLines.length, unitLines.length, referenceLines.length) * 10 + 8);
+}
+
+function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height: number, regular: PDFFont, bold: PDFFont) {
+  const bottom = top - height;
+  if (row.kind === "section") {
+    page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height, color: SECTION_HEADER });
+    drawLines(page, splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12), MARGIN + 6, top - 14, bold, 8.5, INK, 10);
+    return bottom;
+  }
+
+  const baseline = top - 14;
+  const analysisX = MARGIN + 5 + row.indent * 13;
+  const analysisWidth = TABLE_COLUMNS[1] - analysisX - 5;
+  const analysisLines = splitText(row.result.analysis, regular, 8.5, analysisWidth);
+  const resultLines = splitText(formatNumericResult(row.result.value, row.result.unit, row.result.analysisCode) || "-", bold, 8.5, TABLE_COLUMNS[2] - TABLE_COLUMNS[1] - 8);
+  const unitLines = splitText(formatReportUnit(row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[3] - TABLE_COLUMNS[2] - 8);
+  const referenceLines = splitText(formatReportReference(row.result.reference, row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[4] - TABLE_COLUMNS[3] - 8);
+  drawLines(page, analysisLines, analysisX, baseline, regular, 8.5, INK, 10);
+  drawLines(page, resultLines, TABLE_COLUMNS[1] + 4, baseline, bold, 8.5, row.result.flag === "critical" ? CRITICAL : INK, 10);
+  drawLines(page, unitLines, TABLE_COLUMNS[2] + 4, baseline, regular, 8, INK, 10);
+  drawLines(page, referenceLines, TABLE_COLUMNS[3] + 4, baseline, regular, 8, INK, 10);
+  return bottom;
 }
 
 function groupResults(results: LabReportResult[]) {
@@ -156,9 +213,10 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
   const logo = logoBytes[0] === 0x89 && logoBytes[1] === 0x50
     ? await pdf.embedPng(logoBytes)
     : await pdf.embedJpg(logoBytes);
-  let page: PDFPage;
+  const freshTableTop = 792 - MARGIN - CONTENT_WIDTH / (logo.width / logo.height) - 8 - 84;
+  const freshBodySpace = freshTableTop - 49 - 58;
+  let page: PDFPage | undefined;
   let y = 0;
-  let currentGroup = "";
 
   function drawLogo(target: PDFPage, image: PDFImage) {
     const width = CONTENT_WIDTH;
@@ -167,33 +225,36 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
     return 792 - MARGIN - height - 8;
   }
 
-  function addPage(group: string, _continuation = false) {
+  function addPage(group: string, continuation = false) {
     page = pdf.addPage(LETTER);
     const cardTop = drawLogo(page, logo);
     drawPatientCard(page, data, regular, bold, cardTop);
-    y = drawTableHeader(page, bold, group, cardTop - 84);
+    y = drawTableHeader(page, bold, group, cardTop - 84, continuation);
   }
 
   for (const [group, results] of groupResults(data.results)) {
-    currentGroup = group;
-    addPage(group);
-    for (const result of results) {
-      const analysisLines = splitText(result.analysis, regular, 8.5, 224);
-      const resultWithUnit = [formatNumericResult(result.value, result.unit) || "-", expandMillonesText(result.unit)].filter(Boolean).join(" ");
-      const resultLines = splitText(resultWithUnit, regular, 8.5, 138);
-      const referenceLines = splitText(result.reference || "-", regular, 8, 131);
-      const lineCount = Math.max(1, analysisLines.length, resultLines.length, referenceLines.length);
-      const rowHeight = Math.max(18, lineCount * 10 + 5);
-      if (y - rowHeight < 58) addPage(group, true);
-
-      drawLines(page!, analysisLines, MARGIN + 3, y, bold, 8.5);
-      drawLines(page!, resultLines, TABLE_COLUMNS[1] + 3, y, bold, 8.5, result.flag === "critical" ? CRITICAL : INK);
-      drawLines(page!, referenceLines, TABLE_COLUMNS[2] + 3, y, regular, 8);
-      y -= rowHeight;
+    const rows = buildReportTableRows(results);
+    const firstRowHeight = rows[0] ? measureTableRow(rows[0], regular, bold) : 0;
+    const firstResultHeight = rows[0]?.kind === "section" && rows[1]
+      ? measureTableRow(rows[1], regular, bold)
+      : 0;
+    const minimumGroupHeight = 12 + 49 + firstRowHeight + firstResultHeight;
+    const rowsHeight = rows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
+    const requiredHeight = rowsHeight <= freshBodySpace ? 12 + 49 + rowsHeight : minimumGroupHeight;
+    if (!page || y - requiredHeight < 58) addPage(group);
+    else y = drawTableHeader(page, bold, group, y - 12);
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowHeight = measureTableRow(row, regular, bold);
+      const nextHeight = row.kind === "section" && rows[index + 1]
+        ? measureTableRow(rows[index + 1], regular, bold)
+        : 0;
+      if (y - rowHeight - nextHeight < 58) addPage(group, true);
+      y = drawTableRow(page!, row, y, rowHeight, regular, bold);
     }
   }
 
-  if (!currentGroup) addPage("RESULTADOS");
+  if (!page) addPage("RESULTADOS");
 
   const printed = new Intl.DateTimeFormat("es-PE", {
     dateStyle: "short", timeStyle: "short", timeZone: "America/Lima",

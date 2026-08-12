@@ -57,7 +57,7 @@ Salud final: **100/100** en comportamiento y accesibilidad probados.
 
 - Inicio de sesión sin backend: informa que la conexión segura está pendiente.
 - Acceso de demostración: disponible solo con `NEXT_PUBLIC_DEMO_MODE=true`.
-- Navegación: Inicio, Trabajo diario, Pacientes, Analítica, Catálogo,
+- Navegación: Inicio, Resultados, Pacientes, Analítica, Catálogo,
   Importaciones, Auditoría y Configuración.
 - Búsqueda global: abre una orden por código.
 - Valor crítico: impide validar sin confirmación y comunicación.

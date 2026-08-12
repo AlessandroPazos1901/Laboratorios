@@ -1,5 +1,70 @@
 import { flagNumericResult } from "@/lib/clinical";
+import type { SyncConflict } from "@/lib/offline/types";
 import type { AnalysisDefinition, Analyst, LabData, LabOrder, Patient, ResultValue } from "@/lib/types";
+
+export type ResultConflictDetail = {
+  analysis: string;
+  localValue: string;
+  remoteValue: string;
+  matches: boolean;
+};
+
+type ResultConflictEntry = {
+  order_analysis_id?: unknown;
+  clear?: unknown;
+  payload?: {
+    numeric_value?: unknown;
+    qualitative_value?: unknown;
+    text_value?: unknown;
+  };
+};
+
+function normalizedConflictValue(value: unknown, numeric = false) {
+  const text = String(value ?? "").trim();
+  if (!numeric || !text) return text;
+  const number = Number(text);
+  return Number.isFinite(number) ? String(number) : text;
+}
+
+function localConflictValue(entry: ResultConflictEntry) {
+  if (entry.clear === true) return { value: "", valid: true, numeric: false };
+  const payload = entry.payload;
+  if (!payload || typeof payload !== "object") return { value: "", valid: false, numeric: false };
+  if ("numeric_value" in payload) return { value: normalizedConflictValue(payload.numeric_value, true), valid: true, numeric: true };
+  if ("qualitative_value" in payload) return { value: normalizedConflictValue(payload.qualitative_value), valid: true, numeric: false };
+  if ("text_value" in payload) return { value: normalizedConflictValue(payload.text_value), valid: true, numeric: false };
+  return { value: "", valid: false, numeric: false };
+}
+
+export function resultConflictDetails(conflict: SyncConflict, data: LabData): ResultConflictDetail[] {
+  if (conflict.kind !== "results.save") return [];
+  const orderId = typeof conflict.local.orderId === "string" ? conflict.local.orderId : "";
+  const entries = Array.isArray(conflict.local.resultEntries)
+    ? conflict.local.resultEntries as ResultConflictEntry[]
+    : [];
+  const order = data.orders.find((item) => item.id === orderId);
+  if (!order || !entries.length) return [];
+  return entries.flatMap((entry) => {
+    if (typeof entry.order_analysis_id !== "string") return [];
+    const result = order.results.find((item) => item.orderAnalysisId === entry.order_analysis_id);
+    const local = localConflictValue(entry);
+    if (!result || !local.valid) return [];
+    const remote = normalizedConflictValue(result.value, local.numeric || result.resultType === "numeric");
+    return [{
+      analysis: result.analyte,
+      localValue: local.value,
+      remoteValue: remote,
+      matches: local.value === remote,
+    }];
+  });
+}
+
+export function resultConflictAlreadyApplied(conflict: SyncConflict, data: LabData) {
+  if (conflict.kind !== "results.save") return false;
+  const expectedEntries = Array.isArray(conflict.local.resultEntries) ? conflict.local.resultEntries.length : 0;
+  const details = resultConflictDetails(conflict, data);
+  return expectedEntries > 0 && details.length === expectedEntries && details.every((detail) => detail.matches);
+}
 
 export function withSummary(data: LabData): LabData {
   return {

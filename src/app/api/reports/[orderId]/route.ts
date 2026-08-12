@@ -50,7 +50,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     supabase.from("result_revisions").select("id,revision").eq("order_id", order.id).order("revision", { ascending: false }).limit(1).single(),
     supabase.from("order_analyses").select("id,analysis_id,analysis_version_id,batch_id,analyst_id,display_order").eq("order_id", order.id).order("display_order"),
     supabase.from("analysis_groups").select("id,name,display_order"),
-    supabase.from("analyses").select("id,name,group_id,source_metadata"),
+    supabase.from("analyses").select("id,code,name,group_id,source_metadata"),
   ]);
 
   if (
@@ -84,7 +84,11 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     const snapshot = (value.clinical_snapshot ?? {}) as Record<string, unknown>;
     return [{
       group,
+      analysisCode: analysis.code,
       analysis: String(snapshot.analysis_name ?? analysis.name),
+      subsection: typeof (analysis.source_metadata as Record<string, unknown> | null)?.picker_subsection === "string"
+        ? String((analysis.source_metadata as Record<string, unknown>).picker_subsection)
+        : undefined,
       value: String(resultText(value)),
       unit: String(snapshot.unit ?? ""),
       reference: snapshot.historical_unreviewed === true

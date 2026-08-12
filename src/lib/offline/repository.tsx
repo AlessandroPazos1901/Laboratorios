@@ -101,7 +101,7 @@ export function OfflineRepositoryProvider(props: {
     void cleanupInactivePatientRosters(props.session).catch(() => undefined);
   }, [props.session]);
 
-  const commit = async (nextData: LabData, operation: OfflineOperation) => {
+  const commit = async (nextData: LabData, operation: OfflineOperation, syncAfterCommit = false) => {
     if (!props.session) throw new Error("offline_vault_locked");
     const snapshot: OfflineVaultSnapshot = {
       data: nextData,
@@ -111,7 +111,7 @@ export function OfflineRepositoryProvider(props: {
     const updatedSession = await commitOfflineMutation(props.session, snapshot, operation);
     props.setSession(updatedSession);
     props.setData(nextData);
-    props.requestSync();
+    if (syncAfterCommit) props.requestSync();
   };
 
   const repository: OfflineRepository = {
@@ -162,7 +162,7 @@ export function OfflineRepositoryProvider(props: {
         birthDate: patient.birthDate || null,
         sex: patient.sex === "U" ? null : patient.sex,
       };
-      await commit(materializePatient(props.data, patient), operation);
+      await commit(materializePatient(props.data, patient), operation, true);
       return patient;
     },
     async updatePatient(input) {
@@ -241,7 +241,7 @@ export function OfflineRepositoryProvider(props: {
         mutationId: operation.clientMutationId,
         actorName: props.currentUser.fullName,
       });
-      await commit(materialized.data, operation);
+      await commit(materialized.data, operation, true);
       return materialized.order.id;
     },
     async saveResults(order, results) {
@@ -269,8 +269,8 @@ export function OfflineRepositoryProvider(props: {
         return { lockVersion: saved.lock_version, results: next };
       }
       const nextData = materializeResultChanges(props.data, order.id, results);
+      const queued = await listOfflineOperations(props.session, ["pending", "blocked"]);
       if (order.clientMutationId) {
-        const queued = await listOfflineOperations(props.session, ["pending", "blocked"]);
         const original = queued.find((item) => item.operation.clientMutationId === order.clientMutationId)?.operation;
         if (!original) throw new Error("offline_registration_missing");
         original.payload = {
@@ -287,7 +287,14 @@ export function OfflineRepositoryProvider(props: {
         await commit(nextData, original);
         return { lockVersion: order.lockVersion, results };
       }
-      const operation = operationBase(props.session, props.currentUser, "results.save");
+      const pendingSave = queued.find(({ operation }) =>
+        operation.kind === "results.save" && operation.payload.orderId === order.id);
+      // Until it reaches the server, consecutive edits to the same order are one
+      // desired final state. Reuse the mutation id so IndexedDB atomically replaces
+      // the pending payload instead of creating operations with the same base version.
+      const operation = pendingSave
+        ? { ...pendingSave.operation, payload: { ...pendingSave.operation.payload } }
+        : operationBase(props.session, props.currentUser, "results.save");
       operation.baseVersion = order.lockVersion;
       operation.payload = {
         orderId: order.id,
@@ -307,6 +314,7 @@ export function OfflineRepositoryProvider(props: {
       if (!props.session) return null;
       const results = order.results.filter((result) => result.batchId === batchId);
       if (!results.length || results.some((result) => !result.value.trim())) throw new Error("all_batch_results_required");
+      const analysisByVersion = new Map(props.data.analyses.map((analysis) => [analysis.versionId, analysis]));
       const logo = new Uint8Array(await (await fetch("/logo_laboratorio.png")).arrayBuffer());
       const bytes = await buildLabReportPdf({
         orderNumber: Number(order.code.match(/(\d+)$/)?.[1] ?? 0),
@@ -320,7 +328,9 @@ export function OfflineRepositoryProvider(props: {
         printedAt: new Date().toISOString(),
         results: results.map((result) => ({
           group: result.group,
+          analysisCode: result.analysisCode,
           analysis: result.analyte,
+          subsection: result.analysisVersionId ? analysisByVersion.get(result.analysisVersionId)?.subsection : undefined,
           value: result.value,
           unit: result.unit,
           reference: result.reference,
@@ -330,11 +340,11 @@ export function OfflineRepositoryProvider(props: {
       return new Blob([bytes as BlobPart], { type: "application/pdf" });
     },
     async previewPatientRoster(file) {
-      if (!props.session) throw new Error("Habilita y desbloquea el modo offline antes de vincular la base local.");
+      if (!props.session) throw new Error("Primero prepara este equipo para trabajar sin internet y luego ingresa tu PIN.");
       return previewPatientRosterFile(file);
     },
     async importPatientRoster(input) {
-      if (!props.session) throw new Error("Habilita y desbloquea el modo offline antes de vincular la base local.");
+      if (!props.session) throw new Error("Primero prepara este equipo para trabajar sin internet y luego ingresa tu PIN.");
       const rosterId = crypto.randomUUID();
       try {
         await beginPatientRosterImport(props.session, rosterId);

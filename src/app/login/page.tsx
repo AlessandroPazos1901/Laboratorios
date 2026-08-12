@@ -28,7 +28,7 @@ export default function LoginPage() {
   async function recoverPassword() {
     setError("");
     if (!email) return setError("Ingresa tu correo para solicitar la recuperacion.");
-    if (!isSupabaseConfigured) return setError("La recuperacion estara disponible al conectar Supabase.");
+    if (!isSupabaseConfigured) return setError("La recuperacion de contrasena aun no esta disponible. Comunicate con el administrador.");
     setLoading(true);
     const { error: recoveryError } = await createClient().auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}/reset-password`,

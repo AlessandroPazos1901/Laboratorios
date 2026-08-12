@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateAgeAt, expandMillonesText, flagNumericResult, formatNumericResult, formatPatientAgeAt, groupResultsByBatch, isMissingBatchSchema, isValidDni, linkedHematologyValues, normalizeDocument } from "./clinical";
+import { calculateAgeAt, expandMillonesText, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isMissingBatchSchema, isValidDni, linkedHematologyValues, normalizeDocument } from "./clinical";
 import type { ResultValue } from "./types";
 
 describe("calculateAgeAt", () => {
@@ -52,8 +52,12 @@ describe("formatNumericResult", () => {
   it("deja intacto un valor vacío", () => {
     expect(formatNumericResult("")).toBe("");
   });
-  it("expande a la cifra absoluta cuando la unidad está en millones", () => {
-    expect(formatNumericResult("3.78", "millones/µL")).toBe("3,780,000");
+  it("mantiene abreviados los resultados expresados en millones", () => {
+    expect(formatNumericResult("3.78", "millones/µL", "HEM-RBC")).toBe("3.78");
+  });
+  it("muestra leucocitos y plaquetas en miles", () => {
+    expect(formatNumericResult("5000", "/µL", "HEM-WBC")).toBe("5");
+    expect(formatNumericResult("250000", "/µL", "HEM-PLT")).toBe("250");
   });
 });
 
@@ -66,6 +70,16 @@ describe("expandMillonesText", () => {
   });
   it("deja intacto un texto sin 'millones'", () => {
     expect(expandMillonesText("150,000 - 400,000 /µL")).toBe("150,000 - 400,000 /µL");
+  });
+});
+
+describe("formatReferenceRange", () => {
+  it("muestra los millones con notación científica", () => {
+    expect(formatReferenceRange("4.0 - 5.9 millones/µL")).toBe("4.0 - 5.9 10^6/µL");
+  });
+
+  it("mantiene intactos los rangos que no están expresados en millones", () => {
+    expect(formatReferenceRange("12.0 - 17.5 g/dL")).toBe("12.0 - 17.5 g/dL");
   });
 });
 

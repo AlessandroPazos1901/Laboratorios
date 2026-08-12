@@ -86,24 +86,33 @@ export function flagNumericResult(
 }
 
 const isMillonesUnit = (unit: string) => /mill/i.test(unit);
+const thousandResultCodes = new Set(["HEM-WBC", "HEM-PLT"]);
 
-export function formatNumericResult(rawValue: string, unit = "") {
+export function formatNumericResult(rawValue: string, unit = "", analysisCode = "") {
   const trimmed = rawValue.trim();
   const number = Number(trimmed);
   if (!trimmed || !Number.isFinite(number)) return rawValue;
-  if (isMillonesUnit(unit)) return (number * 1_000_000).toLocaleString("es-PE");
+  if (thousandResultCodes.has(analysisCode.toUpperCase())) {
+    return Number((number / 1_000).toFixed(8)).toLocaleString("es-PE", { maximumFractionDigits: 8 });
+  }
+  if (isMillonesUnit(unit)) {
+    return number.toLocaleString("es-PE", { maximumFractionDigits: 8 });
+  }
   const decimals = trimmed.includes(".") ? trimmed.split(".")[1].length : 0;
   return number.toLocaleString("es-PE", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
-// Un análisis "en millones" (ej. HEMATIES, 4.0-5.9 millones/µL) se captura como el valor corto
-// (3.78) pero se muestra expandido (3,780,000); esto reescala el texto de unidad/referencia acorde.
+// Conservado para datos históricos y lugares que todavía requieren la cifra absoluta.
 export function expandMillonesText(text: string) {
   if (!isMillonesUnit(text)) return text;
   return text
     .replace(/\d+(?:[.,]\d+)?/g, (match) => (Number(match.replace(",", ".")) * 1_000_000).toLocaleString("es-PE"))
     .replace(/millones\s*/gi, "")
     .trim();
+}
+
+export function formatReferenceRange(text: string) {
+  return text.replace(/\bmill(?:ón|ones)\b/gi, "10^6");
 }
 
 export function normalizeDocument(value: string) {

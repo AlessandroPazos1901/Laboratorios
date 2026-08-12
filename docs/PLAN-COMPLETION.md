@@ -63,7 +63,7 @@ La aplicación ya dispone de login con Supabase, base de datos, RLS, navegación
 |---|---|---|
 | Login | Funciona | Mejorar errores, sesiones y probar tres cuentas |
 | Inicio | Parcial | Sustituir gráficas y fechas fijas por consultas reales |
-| Trabajo diario | Solo lectura local | Crear registros y guardar resultados en Supabase |
+| Resultados | Solo lectura local | Crear registros y guardar resultados en Supabase |
 | Pacientes | Solo lectura | Buscar, crear, editar y abrir historial |
 | Estadísticas | Maqueta | Filtros y comparaciones reales |
 | Catálogo | Solo lectura | Cargar estructura del Excel y permitir mantenimiento |
@@ -287,7 +287,7 @@ Flujo:
 
 Tareas:
 
-- implementar “Nuevo análisis” desde cabecera, paciente y trabajo diario;
+- implementar “Nuevo análisis” desde cabecera, paciente y Resultados;
 - mostrar favoritos/frecuentes;
 - evitar seleccionar dos veces el mismo análisis;
 - usar controles numéricos, cualitativos y textuales apropiados;
@@ -347,7 +347,7 @@ Criterios de aceptación:
 - no aparecen datos ficticios;
 - el especialista puede sellar y firmar en el área prevista.
 
-### Fase 8 — Trabajo diario
+### Fase 8 — Resultados
 
 Tareas:
 
@@ -478,7 +478,7 @@ Salida:
 
 ### P1 — Gestión
 
-- trabajo diario completo;
+- Resultados completo;
 - estadísticas;
 - comparación por fechas;
 - exportación Excel;

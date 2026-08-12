@@ -8,9 +8,14 @@ import {
   unwrapDataKey,
   wrapDataKey,
 } from "@/lib/offline/crypto";
-import { materializePatient, materializeRegistration } from "@/lib/offline/materialize";
+import {
+  materializePatient,
+  materializeRegistration,
+  resultConflictAlreadyApplied,
+  resultConflictDetails,
+} from "@/lib/offline/materialize";
 import { orderOperationsByDependencies } from "@/lib/offline/sync";
-import type { OfflineOperation } from "@/lib/offline/types";
+import type { OfflineOperation, SyncConflict } from "@/lib/offline/types";
 import type { LabData, Patient } from "@/lib/types";
 
 const emptyData: LabData = {
@@ -102,5 +107,70 @@ describe("orden de sincronización", () => {
       { operation: base(patientId, "patient.upsert", []) },
     ]);
     expect(ordered.map((item) => item.operation.clientMutationId)).toEqual([patientId, registerId]);
+  });
+});
+
+describe("conflictos de resultados", () => {
+  const dataWithResult = (value: string): LabData => ({
+    ...emptyData,
+    orders: [{
+      id: "order-1",
+      lockVersion: 8,
+      revisionId: "revision-1",
+      code: "ORD-1",
+      patientId: 12345678,
+      patientName: "Paciente Prueba",
+      documentNumber: "12345678",
+      patientBirthDate: "1990-01-01",
+      patientSex: "F",
+      createdAt: "2026-08-02T15:00:00.000Z",
+      groups: ["Bioquímica"],
+      responsible: "Tecnólogo Prueba",
+      results: [{
+        id: "result-1",
+        orderAnalysisId: "order-analysis-1",
+        analysisVersionId: "version-1",
+        analyte: "Glucosa",
+        group: "Bioquímica",
+        batchId: "batch-1",
+        registeredAt: "2026-08-02T15:00:00.000Z",
+        value,
+        numericValue: Number(value),
+        unit: "mg/dL",
+        method: "Enzimático",
+        reference: "70-110",
+        flag: "normal",
+        resultType: "numeric",
+        performedBy: "Tecnólogo Prueba",
+      }],
+    }],
+  });
+  const conflict = (numericValue: number): SyncConflict => ({
+    id: "conflict-1",
+    clientMutationId: crypto.randomUUID(),
+    kind: "results.save",
+    reason: "result_concurrent_change",
+    local: {
+      orderId: "order-1",
+      resultEntries: [{ order_analysis_id: "order-analysis-1", payload: { numeric_value: numericValue } }],
+    },
+    remote: { orderId: "order-1", lockVersion: 8 },
+    remoteVersion: 8,
+    createdAt: "2026-08-02T15:05:00.000Z",
+  });
+
+  it("descarta como resuelto un reintento cuyo valor ya está en el servidor", () => {
+    const duplicate = conflict(5.33);
+    expect(resultConflictAlreadyApplied(duplicate, dataWithResult("5.330"))).toBe(true);
+    expect(resultConflictDetails(duplicate, dataWithResult("5.330"))).toEqual([{
+      analysis: "Glucosa",
+      localValue: "5.33",
+      remoteValue: "5.33",
+      matches: true,
+    }]);
+  });
+
+  it("mantiene visible una modificación realmente diferente", () => {
+    expect(resultConflictAlreadyApplied(conflict(5.33), dataWithResult("7.1"))).toBe(false);
   });
 });

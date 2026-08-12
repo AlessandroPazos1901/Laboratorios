@@ -5,6 +5,6 @@ export const dynamic = "force-dynamic";
 
 export async function POST() {
   return NextResponse.json({
-    error: "La carga de pacientes a Supabase fue deshabilitada. Usa Base local desde la PWA.",
+    error: "La carga por internet fue deshabilitada. Usa «Cargar pacientes» desde la sección Pacientes.",
   }, { status: 410 });
 }
