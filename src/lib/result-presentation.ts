@@ -63,9 +63,9 @@ function inferredSubsection(result: ResultPresentationItem) {
   const group = normalizeLabel(result.group);
   const code = result.analysisCode?.toUpperCase() ?? "";
   const analysis = normalizeLabel(result.analysis);
-  if (group.includes("HEMATOLOG") && (HEMOGRAM_CODES.has(code) || HEMOGRAM_NAMES.has(analysis))) return canonicalSubsection("HEMOGRAMA COMPLETO");
   const configuredSubsection = canonicalSubsection(result.subsection);
   if (configuredSubsection) return configuredSubsection;
+  if (group.includes("HEMATOLOG") && (HEMOGRAM_CODES.has(code) || HEMOGRAM_NAMES.has(analysis))) return canonicalSubsection("HEMOGRAMA COMPLETO");
   if (group.includes("UROANAL")) {
     if (/^URO-(COLOR|ASP|PH|REAC|DEN)$/.test(code) || ["COLOR", "ASPECTO", "PH", "DENSIDAD", "REACCION"].includes(analysis)) return canonicalSubsection("EXAMEN FISICO");
     if (/^URO-(GLU|CET|PRO|BIL|BLD|NIT|URO|ASC)$/.test(code) || ["GLUCOSA", "CETONAS", "PROTEINAS", "BILIRRUBINA", "SANGRE", "NITRITOS", "UROBILINOGENO", "ACIDO ASCORBICO", "A ASCORBICO"].includes(analysis)) return canonicalSubsection("EXAMEN BIOQUIMICO");

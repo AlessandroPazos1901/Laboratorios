@@ -29,6 +29,22 @@ const orderedGroup = (groupOrder: number, results: LabReportResult[]) => results
   .map((result, index) => ({ ...result, groupOrder, analysisOrder: (index + 1) * 10 }));
 
 describe("buildLabReportPdf", () => {
+  it("respeta el título de una subsección creada en el catálogo", () => {
+    const rows = buildReportTableRows([
+      { ...reportResult("HEM-RBC", "HEMATIES"), subsection: "Serie roja" },
+      { ...reportResult("HEM-HB", "HEMOGLOBINA"), subsection: "Serie roja" },
+      { ...reportResult("HEM-WBC", "LEUCOCITOS"), subsection: "Serie blanca" },
+    ]);
+
+    expect(rows.map((row) => row.kind === "result" ? `R:${row.result.analysis}` : `S:${row.label}`)).toEqual([
+      "S:SERIE ROJA",
+      "R:HEMATIES",
+      "R:HEMOGLOBINA",
+      "S:SERIE BLANCA",
+      "R:LEUCOCITOS",
+    ]);
+  });
+
   it("organiza hematología con el hemograma y su fórmula indentados", () => {
     const rows = buildReportTableRows([
       reportResult("HEM-RBC", "HEMATIES"),
