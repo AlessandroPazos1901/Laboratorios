@@ -22,10 +22,27 @@ export type LabData = {
   patients: Patient[];
   orders: LabOrder[];
   analyses: AnalysisDefinition[];
+  catalogGroups?: CatalogGroup[];
+  catalogSubsections?: CatalogSubsection[];
   analysts: Analyst[];
   trend: { date: string; value: number }[];
   summary: AnalyticsSummary;
   reportSettings?: { tradeName: string; footer: string };
+};
+
+export type CatalogGroup = {
+  id: string;
+  name: string;
+  displayOrder: number;
+  active: boolean;
+};
+
+export type CatalogSubsection = {
+  id: string;
+  groupId: string;
+  group: string;
+  name: string;
+  displayOrder: number;
 };
 
 export type Analyst = {
@@ -80,6 +97,7 @@ export type LabOrder = {
 
 export type AnalysisDefinition = {
   id: string;
+  groupId?: string;
   versionId: string;
   code: string;
   name: string;

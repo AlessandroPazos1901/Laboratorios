@@ -1,21 +1,22 @@
 "use client";
 
 import {
-  Activity, ArrowLeft, BarChart3, BookOpenCheck, CalendarDays, Check, ChevronRight, CircleAlert,
+  Activity, ArrowDown, ArrowLeft, ArrowUp, BarChart3, CalendarDays, Check, ChevronRight, CircleAlert,
   ClipboardList, Database, FileClock, FileDown, FlaskConical,
-  Import, KeyRound, LogOut, Menu, Microscope, PanelLeftClose, PanelLeftOpen, Plus, Search,
-  Settings, ShieldCheck, TestTube2, UserRound, Users, X,
+  GripVertical, Import, KeyRound, LogOut, Menu, Microscope, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Search,
+  Settings, ShieldCheck, TestTube2, Trash2, UserRound, Users, X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { buildPickerGroups } from "@/lib/catalog-presets";
-import { flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, linkedHematologyValues } from "@/lib/clinical";
+import { analysisBelongsToCatalogGroup, buildCatalogGroupOptions, catalogSubsectionDeleteRequest, catalogSubsectionRenameRequest } from "@/lib/catalog-groups";
+import { biochemistryFormulaKey, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isCalculatedHematologyResult, linkedBiochemistryValues, linkedHematologyValues, type BiochemistryFormulaKey } from "@/lib/clinical";
 import {
   buildResultPresentationRows, formatResultReference, formatResultUnit, resultDisplayNumber, resultStorageValue,
 } from "@/lib/result-presentation";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { useOfflineRepository } from "@/lib/offline/repository";
-import type { AnalysisDefinition, LabData, LabOrder, ResultValue } from "@/lib/types";
+import type { AnalysisDefinition, CatalogGroup, CatalogSubsection, LabData, LabOrder, ResultValue } from "@/lib/types";
 
 type View = "trabajo" | "pacientes" | "analitica" | "catalogo" | "configuracion";
 const nav: { id: View; label: string; icon: typeof Activity }[] = [
@@ -78,6 +79,11 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
   const router = useRouter();
   const sourcePatients = data.patients;
   const sourceAnalyses = data.analyses;
+  const catalogRevision = useMemo(() => JSON.stringify({
+    analyses: sourceAnalyses.map(({ id, versionId, groupId, name, active, subsection, pickerOrder }) => ({ id, versionId, groupId, name, active, subsection, pickerOrder })),
+    groups: data.catalogGroups,
+    subsections: data.catalogSubsections,
+  }), [sourceAnalyses, data.catalogGroups, data.catalogSubsections]);
   const [view, setView] = useState<View>("analitica");
   const sourceOrders = data.orders;
   const [orderOverrides, setOrderOverrides] = useState<Record<string, LabOrder>>({});
@@ -177,7 +183,7 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
           /> : <WorkQueue orders={orders} analyses={sourceAnalyses} selectedId={selectedId} setSelectedId={setSelectedId} updateOrder={updateOrder} notify={setNotice} openNewRecord={openNewRecord} />)}
           {view === "pacientes" && <PatientsView patients={sourcePatients} orders={orders} openOrder={openOrder} notify={setNotice} />}
           {view === "analitica" && <AnalyticsView orders={orders} openOrder={openOrder} />}
-          {view === "catalogo" && <CatalogView analyses={sourceAnalyses} />}
+          {view === "catalogo" && <CatalogView key={catalogRevision} analyses={sourceAnalyses} catalogGroups={data.catalogGroups ?? []} subsections={data.catalogSubsections ?? []} />}
           {view === "configuracion" && <SettingsView analysts={data.analysts ?? []} />}
         </main>
       </div>
@@ -185,8 +191,8 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
   );
 }
 
-function PageHead({ eyebrow, title, text, action }: { eyebrow: string; title: string; text: string; action?: React.ReactNode }) {
-  return <div className="page-head"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{text}</p></div>{action}</div>;
+function PageHead({ eyebrow, title, text, action, compact = false }: { eyebrow: string; title: string; text: string; action?: React.ReactNode; compact?: boolean }) {
+  return <div className={compact ? "page-head compact" : "page-head"}><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{text}</p></div>{action}</div>;
 }
 
 function rpcMessage(message: string) {
@@ -328,6 +334,18 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
         allAnalyses.forEach((candidate) => {
           const calculated = linked[candidate.code as keyof typeof linked];
           if (calculated !== undefined) next[candidate.versionId] = calculated;
+        });
+      }
+      const sourceKey = analysis.resultType === "numeric" ? biochemistryFormulaKey(analysis.code, analysis.name) : null;
+      if (sourceKey) {
+        const currentBiochemistry = Object.fromEntries(allAnalyses.flatMap((candidate) => {
+          const key = biochemistryFormulaKey(candidate.code, candidate.name);
+          return key ? [[key, next[candidate.versionId] ?? ""]] : [];
+        })) as Partial<Record<BiochemistryFormulaKey, string>>;
+        const calculated = linkedBiochemistryValues(sourceKey, sanitized, currentBiochemistry);
+        allAnalyses.forEach((candidate) => {
+          const key = biochemistryFormulaKey(candidate.code, candidate.name);
+          if (key && calculated[key] !== undefined) next[candidate.versionId] = calculated[key];
         });
       }
       return next;
@@ -505,12 +523,12 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           </nav>
           <p className="entry-group-hint" id="active-group-title">Escribe únicamente los resultados realizados. Usa Tab para avanzar.</p>
           <div className="direct-result-grid">
-            {currentAnalyses.map((analysis) => { const rawValue = resultValues[analysis.versionId] ?? ""; const storedValue = resultStorageValue(rawValue, analysis.code); const numericValue = Number(storedValue); const previewFlag = analysis.resultType === "numeric" && rawValue.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, analysis) : "normal"; return <div key={analysis.versionId} className={`direct-result-row ${rawValue.trim() ? "completed" : ""} ${previewFlag !== "normal" ? "outside-range" : ""}`}>
+            {currentAnalyses.map((analysis) => { const rawValue = resultValues[analysis.versionId] ?? ""; const storedValue = resultStorageValue(rawValue, analysis.code); const numericValue = Number(storedValue); const previewFlag = analysis.resultType === "numeric" && rawValue.trim() && Number.isFinite(numericValue) ? flagNumericResult(numericValue, analysis) : "normal"; const calculatedHematology = isCalculatedHematologyResult(analysis.code, analysis.name); return <div key={analysis.versionId} className={`direct-result-row ${rawValue.trim() ? "completed" : ""} ${previewFlag !== "normal" ? "outside-range" : ""} ${calculatedHematology ? "calculated" : ""}`}>
               <label htmlFor={`direct-result-${analysis.versionId}`}><strong>{analysis.name}</strong><small>{analysis.subsection ?? analysis.code}</small></label>
               <div className="direct-result-control">
                 {analysis.qualitativeOptions?.length
                   ? <ResultChoiceField id={`direct-result-${analysis.versionId}`} className="direct-result-input" value={rawValue} options={analysis.qualitativeOptions} onChange={(value) => changeAnalysisResult(analysis, value)} label={`Resultado de ${analysis.name}`} />
-                  : <input id={`direct-result-${analysis.versionId}`} className="direct-result-input" value={rawValue} inputMode={analysis.resultType === "numeric" ? "decimal" : "text"} onChange={(event) => changeAnalysisResult(analysis, event.target.value)} placeholder="—" aria-label={`Resultado de ${analysis.name}`} autoComplete="off" />}
+                  : <input id={`direct-result-${analysis.versionId}`} className="direct-result-input" value={rawValue} disabled={calculatedHematology} inputMode={analysis.resultType === "numeric" ? "decimal" : "text"} onChange={(event) => changeAnalysisResult(analysis, event.target.value)} placeholder="—" aria-label={`Resultado de ${analysis.name}`} autoComplete="off" />}
                 {previewFlag !== "normal" && <small className={`inline-range-warning ${previewFlag}`}><CircleAlert />Fuera de rango</small>}
               </div>
               <div className="direct-result-meta"><span>{formatResultUnit(analysis.unit, analysis.code) || "Sin unidad"}</span><small>{analysis.reference ? formatResultReference(analysis.reference, analysis.unit, analysis.code) : "Sin referencia"}</small></div>
@@ -543,7 +561,7 @@ function WorkQueue({ orders, analyses, selectedId, setSelectedId, updateOrder, n
       .includes(value);
   });
   return <>
-    <PageHead eyebrow="Operación" title="Resultados" text="Registra resultados y continúa rápidamente donde lo dejaste." action={<button className="button primary" onClick={openNewRecord}><Plus />Nuevo análisis</button>} />
+    <PageHead compact eyebrow="Operación" title="Resultados" text="Consulta y registra análisis." action={<button className="button primary" onClick={openNewRecord}><Plus />Nuevo análisis</button>} />
     <div className="work-layout">
       <section className="panel order-list">
         <div className="compact-search"><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filtrar por orden, DNI o paciente" aria-label="Filtrar cola por orden, DNI o paciente" /></div>
@@ -564,6 +582,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
   const resultBatches = useMemo(() => groupResultsByBatch(draft, order.createdAt), [draft, order.createdAt]);
   const [selectedBatchId, setSelectedBatchId] = useState(resultBatches[0]?.batchId ?? "");
   const activeBatch = resultBatches.find((item) => item.batchId === selectedBatchId) ?? resultBatches[0];
+  const [printResultIds, setPrintResultIds] = useState<Set<string>>(() => new Set(resultBatches[0]?.results.map((result) => result.orderAnalysisId) ?? []));
   const orderedBatchResults = useMemo(() => {
     if (!activeBatch) return [];
     const orderedVersions = buildPickerGroups(analyses).flatMap((group) => group.items.map((analysis) => analysis.versionId));
@@ -585,6 +604,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
   }, [analyses, orderedBatchResults]);
   const activeBatchAnalysts = useMemo(() => [...new Set(activeBatch?.results.map((result) => result.performedBy).filter(Boolean) ?? [])], [activeBatch]);
   const critical = activeBatch?.results.some((result) => result.flag === "critical") ?? false;
+  const allActiveResultsSelected = Boolean(activeBatch?.results.length) && activeBatch.results.every((result) => printResultIds.has(result.orderAnalysisId));
 
   function changeResult(id: string, value: string) {
     setDraft((results) => {
@@ -597,10 +617,24 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
       const linked = source.resultType === "numeric" && source.analysisCode
         ? linkedHematologyValues(source.analysisCode, sanitized)
         : null;
+      const sourceBiochemistryKey = source.resultType === "numeric"
+        ? biochemistryFormulaKey(source.analysisCode ?? "", source.analyte)
+        : null;
+      const currentBiochemistry = Object.fromEntries(results.flatMap((result) => {
+        const key = biochemistryFormulaKey(result.analysisCode ?? "", result.analyte);
+        return key && result.batchId === source.batchId ? [[key, result.id === id ? sanitized : result.value]] : [];
+      })) as Partial<Record<BiochemistryFormulaKey, string>>;
+      const linkedBiochemistry = sourceBiochemistryKey
+        ? linkedBiochemistryValues(sourceBiochemistryKey, sanitized, currentBiochemistry)
+        : null;
       return results.map((result) => {
         let nextValue = result.id === id ? sanitized : result.value;
         if (linked && result.batchId === source.batchId && result.analysisCode) {
           nextValue = linked[result.analysisCode as keyof typeof linked] ?? nextValue;
+        }
+        if (linkedBiochemistry && result.batchId === source.batchId) {
+          const key = biochemistryFormulaKey(result.analysisCode ?? "", result.analyte);
+          if (key && linkedBiochemistry[key] !== undefined) nextValue = linkedBiochemistry[key];
         }
         if (nextValue === result.value) return result;
         if (result.resultType !== "numeric") return { ...result, value: nextValue };
@@ -716,8 +750,22 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
     return lockVersion;
   }
 
-  async function printReport() {
-    if (!activeBatch || printing || saving) return;
+  function selectResultBatch(batchId: string, resultIds: string[]) {
+    setSelectedBatchId(batchId);
+    setPrintResultIds(new Set(resultIds));
+  }
+
+  function togglePrintResult(resultId: string) {
+    setPrintResultIds((current) => {
+      const next = new Set(current);
+      if (next.has(resultId)) next.delete(resultId);
+      else next.add(resultId);
+      return next;
+    });
+  }
+
+  async function printReport(includedResultIds: string[]) {
+    if (!activeBatch || !includedResultIds.length || printing || saving) return;
     // Open while the click still has user activation. Navigating a window after
     // awaiting save/PDF generation works in installed PWAs and offline tabs.
     const preview = preparePdfWindow();
@@ -733,6 +781,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
         const blob = await offlineRepository.buildOfflineReport(
           { ...order, results: draft, lockVersion },
           activeBatch.batchId,
+          includedResultIds,
         );
         if (!blob) throw new Error("offline_report_unavailable");
         report = blob;
@@ -743,8 +792,8 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
           cache: "no-store",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(legacyBatch
-            ? { group: activeBatch.group }
-            : { batchId: activeBatch.batchId }),
+            ? { group: activeBatch.group, resultIds: includedResultIds }
+            : { batchId: activeBatch.batchId, resultIds: includedResultIds }),
         });
         if (!reportResponse.ok) {
           const error = await reportResponse.json().catch(() => null) as { error?: string } | null;
@@ -782,20 +831,22 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
     </div>
     {order.results.length === 0 ? <div className="empty"><Microscope /><h3>Este registro no tiene análisis</h3><p>Crea un nuevo registro seleccionando al menos un análisis.</p></div> : <>
       <div className="result-toolbar"><div><h2>Resultados por registro</h2><p>{draft.length} análisis · {resultBatches.length} tandas ordenadas por fecha</p></div>{activeBatchAnalysts.length > 0 && <span className="result-toolbar-analyst"><span>Realizado por <strong>{activeBatchAnalysts.join(" · ")}</strong></span></span>}</div>
-      <nav className="result-group-menu" aria-label="Tandas realizadas">{resultBatches.map((item) => <button type="button" key={item.batchId} className={item.batchId === activeBatch?.batchId ? "active" : ""} onClick={() => setSelectedBatchId(item.batchId)}>
+      <nav className="result-group-menu" aria-label="Tandas realizadas">{resultBatches.map((item) => <button type="button" key={item.batchId} className={item.batchId === activeBatch?.batchId ? "active" : ""} onClick={() => selectResultBatch(item.batchId, item.results.map((result) => result.orderAnalysisId))}>
         <span><strong><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(item.group)}</span>{item.group}</strong><small>{fmtDate(item.registeredAt)}</small></span><b>{item.results.length}</b>
       </button>)}</nav>
       {activeBatch && <div className="result-groups"><section className="result-group" aria-labelledby="active-result-group">
-        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><button className="button secondary" onClick={printReport} disabled={saving || printing} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : "Ver e imprimir informe"}</button></div>
+        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><button className="button secondary" onClick={() => void printReport([...printResultIds])} disabled={saving || printing || !printResultIds.size} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : `Imprimir seleccionados (${printResultIds.size})`}</button></div>
         <div className="clinical-results-wrap"><table className="clinical-results-table">
-          <thead><tr><th>Examen</th><th>Resultado</th><th>Unidad</th><th>Valores normales</th><th aria-label="Acciones" /></tr></thead>
+          <thead><tr><th className="clinical-result-select"><input type="checkbox" checked={allActiveResultsSelected} onChange={() => setPrintResultIds(allActiveResultsSelected ? new Set() : new Set(activeBatch.results.map((result) => result.orderAnalysisId)))} aria-label={allActiveResultsSelected ? "No incluir ningún análisis en el informe" : "Incluir todos los análisis en el informe"} title="Seleccionar todos para imprimir" /></th><th>Examen</th><th>Resultado</th><th>Unidad</th><th>Valores normales</th><th aria-label="Acciones" /></tr></thead>
           <tbody>{presentationRows.map((row, index) => {
-            if (row.kind === "section") return <tr className="clinical-section-row" key={`section-${row.label}-${index}`}><th colSpan={5}>{row.label}</th></tr>;
+            if (row.kind === "section") return <tr className="clinical-section-row" key={`section-${row.label}-${index}`}><th colSpan={6}>{row.label}</th></tr>;
             const result = row.result;
             const editing = editingResultId === result.orderAnalysisId;
+            const calculatedHematology = isCalculatedHematologyResult(result.analysisCode ?? "", result.analyte);
             const alertLabel = result.flag === "low" ? "Bajo" : result.flag === "high" ? "Alto" : result.flag === "critical" ? "Crítico" : null;
             return <tr key={result.orderAnalysisId} className={`clinical-result-row ${result.flag} ${editing ? "editing" : ""}`}>
-              <td style={{ paddingLeft: `${14 + row.indent * 18}px` }}><strong>{result.analyte}</strong></td>
+              <td className="clinical-result-select"><input type="checkbox" checked={printResultIds.has(result.orderAnalysisId)} onChange={() => togglePrintResult(result.orderAnalysisId)} aria-label={`${printResultIds.has(result.orderAnalysisId) ? "Excluir" : "Incluir"} ${result.analyte} del informe`} /></td>
+              <td className="clinical-result-name" style={{ paddingLeft: `${14 + row.indent * 18}px` }}><strong>{result.analyte}</strong></td>
               <td className="clinical-result-value">{editing
                 ? result.qualitativeOptions?.length
                   ? <ResultChoiceField id={result.id} className={`result-input ${result.flag}`} value={editingValue} options={result.qualitativeOptions} onChange={(value) => changeEditingResult(result, value)} label={`Resultado de ${result.analyte}`} />
@@ -803,7 +854,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
                 : <span className="clinical-result-reading"><strong>{result.resultType === "numeric" ? formatNumericResult(result.value, result.unit, result.analysisCode) : result.value}</strong>{alertLabel && <small className="clinical-result-alert">{alertLabel}</small>}</span>}</td>
               <td className="clinical-result-unit">{formatResultUnit(result.unit, result.analysisCode) || ""}</td>
               <td className="clinical-result-reference">{result.reference ? formatResultReference(result.reference, result.unit, result.analysisCode) : ""}</td>
-              <td className="clinical-result-action"><button type="button" className={editing ? "result-edit-button active" : "result-edit-button"} onClick={() => startEditing(result)} aria-pressed={editing}>{editing ? "Listo" : "Editar"}</button></td>
+              <td className="clinical-result-action">{!calculatedHematology && <button type="button" className={editing ? "result-edit-button active" : "result-edit-button"} onClick={() => startEditing(result)} aria-pressed={editing}>{editing ? "Listo" : "Editar"}</button>}</td>
             </tr>;
           })}</tbody>
         </table></div>
@@ -1267,93 +1318,305 @@ function AnalyticsBars({ data, emptyLabel }: { data: { name: string; value: numb
   return <div className="analytics-bars">{data.map((item) => <div className="analytics-bar-row" key={item.name}><div><span title={item.name}>{item.name}</span><strong>{item.value}</strong></div><i><b style={{ width: `${item.value / maximum * 100}%` }} /></i></div>)}</div>;
 }
 
-function CatalogView({ analyses }: { analyses: LabData["analyses"] }) {
+async function catalogRequest(body: Record<string, unknown>) {
+  const response = await fetch("/api/catalog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const payload = await response.json().catch(() => null) as { data?: unknown; error?: string } | null;
+  if (!response.ok) throw new Error(payload?.error ?? "No se pudo guardar el catálogo.");
+  return payload?.data;
+}
+
+const catalogSectionKey = (value: string | null | undefined) => value?.trim().toLocaleLowerCase("es") || "";
+
+function CatalogView({ analyses, catalogGroups, subsections }: { analyses: LabData["analyses"]; catalogGroups: CatalogGroup[]; subsections: CatalogSubsection[] }) {
+  const router = useRouter();
+  const offlineRepository = useOfflineRepository();
+  const [localAnalyses, setLocalAnalyses] = useState(analyses);
+  const localSubsections = subsections;
+  const [activeGroupId, setActiveGroupId] = useState(() => buildCatalogGroupOptions(analyses.filter((analysis) => analysis.active), catalogGroups)[0]?.id ?? "");
+  const [groupEditor, setGroupEditor] = useState<"create" | "rename" | null>(null);
+  const [groupName, setGroupName] = useState("");
   const [query, setQuery] = useState("");
-  const [group, setGroup] = useState("");
-  const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<LabData["analyses"][number] | null>(null);
-  const groups = new Set(analyses.map((analysis) => analysis.group));
-  const archived = analyses.filter((analysis) => !analysis.active).length;
-  const visible = analyses.filter((analysis) =>
-    (!group || analysis.group === group)
-    && `${analysis.code} ${analysis.name}`.toLocaleLowerCase("es").includes(query.toLocaleLowerCase("es")),
-  );
-  const pageCount = Math.max(1, Math.ceil(visible.length / 20));
-  const currentPage = Math.min(page, pageCount);
-  const pagedAnalyses = visible.slice((currentPage - 1) * 20, currentPage * 20);
+  const [editingAnalysis, setEditingAnalysis] = useState<AnalysisDefinition | null>(null);
+  const [creatingAnalysis, setCreatingAnalysis] = useState(false);
+  const [newSubsectionName, setNewSubsectionName] = useState("");
+  const [renamingSubsectionId, setRenamingSubsectionId] = useState("");
+  const [renamingSubsectionName, setRenamingSubsectionName] = useState("");
+  const [draggedAnalysisId, setDraggedAnalysisId] = useState("");
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const refreshStoredCatalog = offlineRepository?.refresh;
+  const storedCatalogOnline = offlineRepository?.online;
+
+  const groups = useMemo(() => buildCatalogGroupOptions(localAnalyses.filter((analysis) => analysis.active), catalogGroups), [catalogGroups, localAnalyses]);
+  const activeGroup = groups.find((group) => group.id === activeGroupId) ?? groups[0] ?? null;
+
+  useEffect(() => {
+    if (!storedCatalogOnline || !refreshStoredCatalog || !localAnalyses.some((analysis) => analysis.active && !analysis.groupId)) return;
+    let cancelled = false;
+    void refreshStoredCatalog().catch(() => {
+      if (!cancelled) setMessage({ type: "error", text: "No se pudo actualizar el catálogo. Puedes seguir consultándolo e intentarlo nuevamente." });
+    });
+    return () => { cancelled = true; };
+  }, [localAnalyses, refreshStoredCatalog, storedCatalogOnline]);
+
+  const activeSections = useMemo(() => {
+    if (!activeGroup) return [];
+    const stored = localSubsections.filter((section) => activeGroup.persisted
+      ? section.groupId === activeGroup.id
+      : catalogSectionKey(section.group) === catalogSectionKey(activeGroup.name))
+      .sort((left, right) => left.displayOrder - right.displayOrder);
+    const known = new Set(stored.map((section) => catalogSectionKey(section.name)));
+    const inferred = [...new Set(localAnalyses.filter((analysis) => analysis.active && analysisBelongsToCatalogGroup(analysis, activeGroup) && analysis.subsection && !known.has(catalogSectionKey(analysis.subsection))).map((analysis) => analysis.subsection!))]
+      .map((name, index) => ({ id: `legacy:${activeGroup.id}:${name}`, groupId: activeGroup.id, group: activeGroup.name, name, displayOrder: 900 + index }));
+    return [...stored, ...inferred];
+  }, [activeGroup, localAnalyses, localSubsections]);
+  const activeItems = useMemo(() => localAnalyses.filter((analysis) => analysis.active && activeGroup && analysisBelongsToCatalogGroup(analysis, activeGroup))
+    .sort((left, right) => (left.pickerOrder ?? 999) - (right.pickerOrder ?? 999) || left.name.localeCompare(right.name, "es")), [activeGroup, localAnalyses]);
+
+  async function refreshCatalog() {
+    if (offlineRepository) await offlineRepository.refresh();
+    else router.refresh();
+  }
+
+  function requireConnection() {
+    if (offlineRepository && !offlineRepository.online) {
+      setMessage({ type: "error", text: "Organizar el catálogo requiere conexión a internet." });
+      return false;
+    }
+    return true;
+  }
+
+  async function runCatalogChange(body: Record<string, unknown>, success: string, refresh = true) {
+    if (!requireConnection()) return false;
+    setSaving(true);
+    setMessage(null);
+    try {
+      await catalogRequest(body);
+      setMessage({ type: "success", text: success });
+      if (refresh) await refreshCatalog();
+      return true;
+    } catch (reason) {
+      setMessage({ type: "error", text: reason instanceof Error ? reason.message : "No se pudo guardar el catálogo." });
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function layoutOrder(items: AnalysisDefinition[], destination: string | null, draggedId: string, beforeId?: string) {
+    const sectionOrder = ["", ...activeSections.map((section) => catalogSectionKey(section.name))];
+    const dragged = items.find((analysis) => analysis.id === draggedId);
+    if (!dragged) return items;
+    const moved = { ...dragged, subsection: destination || undefined };
+    const buckets = new Map(sectionOrder.map((key) => [key, items.filter((analysis) => analysis.id !== draggedId && catalogSectionKey(analysis.subsection) === key)]));
+    const destinationKey = catalogSectionKey(destination);
+    const destinationItems = buckets.get(destinationKey) ?? [];
+    const targetIndex = beforeId ? destinationItems.findIndex((analysis) => analysis.id === beforeId) : -1;
+    destinationItems.splice(targetIndex < 0 ? destinationItems.length : targetIndex, 0, moved);
+    buckets.set(destinationKey, destinationItems);
+    return sectionOrder.flatMap((key) => buckets.get(key) ?? []).map((analysis, index) => ({ ...analysis, pickerOrder: (index + 1) * 10 }));
+  }
+
+  async function saveLayout(ordered: AnalysisDefinition[]) {
+    if (!activeGroup?.persisted) {
+      setMessage({ type: "error", text: "Actualiza el catálogo antes de cambiar el orden." });
+      return;
+    }
+    const previous = localAnalyses;
+    setLocalAnalyses((current) => current.map((analysis) => ordered.find((item) => item.id === analysis.id) ?? analysis));
+    const saved = await runCatalogChange({ action: "layout.save", groupId: activeGroup.id, items: ordered.map((analysis) => ({ analysisId: analysis.id, subsection: analysis.subsection ?? null, displayOrder: analysis.pickerOrder ?? 999 })) }, "Orden actualizado.", false);
+    if (!saved) setLocalAnalyses(previous);
+  }
+
+  function dropAnalysis(subsection: string | null, beforeId?: string) {
+    if (!draggedAnalysisId || query) return;
+    if (beforeId === draggedAnalysisId) {
+      setDraggedAnalysisId("");
+      return;
+    }
+    const ordered = layoutOrder(activeItems, subsection, draggedAnalysisId, beforeId);
+    setDraggedAnalysisId("");
+    void saveLayout(ordered);
+  }
+
+  function moveAnalysis(analysis: AnalysisDefinition, direction: -1 | 1) {
+    const sectionKey = catalogSectionKey(analysis.subsection);
+    const sectionOrder = ["", ...activeSections.map((section) => catalogSectionKey(section.name))];
+    const sameSection = activeItems.filter((item) => catalogSectionKey(item.subsection) === sectionKey);
+    const index = sameSection.findIndex((item) => item.id === analysis.id);
+    if (!sameSection[index + direction]) return;
+    const reorderedSection = [...sameSection];
+    [reorderedSection[index], reorderedSection[index + direction]] = [reorderedSection[index + direction], reorderedSection[index]];
+    const ordered = sectionOrder.flatMap((key) => key === sectionKey
+      ? reorderedSection
+      : activeItems.filter((item) => catalogSectionKey(item.subsection) === key))
+      .map((item, itemIndex) => ({ ...item, pickerOrder: (itemIndex + 1) * 10 }));
+    void saveLayout(ordered);
+  }
+
+  async function createSubsection(event: React.FormEvent) {
+    event.preventDefault();
+    if (!activeGroup?.persisted || newSubsectionName.trim().length < 2) return;
+    if (await runCatalogChange({ action: "subsection.create", groupId: activeGroup.id, name: newSubsectionName.trim() }, "Subsección creada.")) setNewSubsectionName("");
+  }
+
+  async function saveGroup(event: React.FormEvent) {
+    event.preventDefault();
+    const name = groupName.trim();
+    if (name.length < 2) return;
+    const saved = groupEditor === "create"
+      ? await runCatalogChange({ action: "group.create", name }, "Sección creada.")
+      : activeGroup?.persisted
+        ? await runCatalogChange({ action: "group.rename", groupId: activeGroup.id, name }, "Sección actualizada.")
+        : false;
+    if (saved) {
+      setGroupEditor(null);
+      setGroupName("");
+    }
+  }
+
+  async function archiveGroup() {
+    if (!activeGroup?.persisted) return;
+    const count = localAnalyses.filter((analysis) => analysis.active && analysisBelongsToCatalogGroup(analysis, activeGroup)).length;
+    if (!window.confirm(`¿Retirar la sección «${activeGroup.name}» y sus ${count} análisis de los nuevos registros? Los informes anteriores se conservarán.`)) return;
+    if (await runCatalogChange({ action: "group.archive", groupId: activeGroup.id }, "Sección retirada. Los informes anteriores se conservaron.")) {
+      setGroupEditor(null);
+      setActiveGroupId("");
+    }
+  }
+
+  async function renameSubsection(section: CatalogSubsection) {
+    if (!activeGroup?.persisted || renamingSubsectionName.trim().length < 2) return;
+    const request = catalogSubsectionRenameRequest({
+      subsectionId: section.id,
+      groupId: activeGroup.id,
+      currentName: section.name,
+      nextName: renamingSubsectionName.trim(),
+    });
+    if (await runCatalogChange(request, "Subsección actualizada.")) setRenamingSubsectionId("");
+  }
+
+  async function deleteSubsection(section: CatalogSubsection) {
+    if (!window.confirm(`¿Eliminar la subsección «${section.name}»? Sus análisis permanecerán en el grupo.`)) return;
+    if (!activeGroup?.persisted) return;
+    await runCatalogChange(catalogSubsectionDeleteRequest({
+      subsectionId: section.id,
+      groupId: activeGroup.id,
+      currentName: section.name,
+    }), "Subsección eliminada. Sus análisis permanecen en el grupo.");
+  }
+
+  async function moveSubsection(section: CatalogSubsection, direction: -1 | 1) {
+    if (section.id.startsWith("legacy:")) return;
+    const stored = activeSections.filter((item) => !item.id.startsWith("legacy:"));
+    const index = stored.findIndex((item) => item.id === section.id);
+    if (!stored[index + direction] || !activeGroup) return;
+    const reordered = [...stored];
+    [reordered[index], reordered[index + direction]] = [reordered[index + direction], reordered[index]];
+    await runCatalogChange({ action: "subsection.reorder", groupId: activeGroup.id, subsectionIds: reordered.map((item) => item.id) }, "Orden de subsecciones actualizado.");
+  }
+
+  async function archiveAnalysis(analysis: AnalysisDefinition) {
+    if (!window.confirm(`¿Retirar «${analysis.name}» del registro de nuevos análisis? Los informes anteriores se conservarán.`)) return;
+    if (await runCatalogChange({ action: "analysis.archive", analysisId: analysis.id }, "Análisis retirado.")) setLocalAnalyses((current) => current.map((item) => item.id === analysis.id ? { ...item, active: false } : item));
+  }
+
+  const renderSection = (section: CatalogSubsection | null) => {
+    const sectionName = section?.name ?? null;
+    const items = activeItems.filter((analysis) => catalogSectionKey(analysis.subsection) === catalogSectionKey(sectionName))
+      .filter((analysis) => !query.trim() || normalizePatientLookup(`${analysis.name} ${analysis.reference} ${analysis.unit}`).includes(normalizePatientLookup(query)));
+    const editableSection = Boolean(section && activeGroup?.persisted);
+    const storedSection = Boolean(section && !section.id.startsWith("legacy:"));
+    return <section className="catalog-section" key={section?.id ?? "without-subsection"} onDragOver={(event) => event.preventDefault()} onDrop={() => dropAnalysis(sectionName)}>
+      <header className="catalog-section-head">
+        <div>{renamingSubsectionId === section?.id
+          ? <input autoFocus value={renamingSubsectionName} onChange={(event) => setRenamingSubsectionName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void renameSubsection(section); if (event.key === "Escape") setRenamingSubsectionId(""); }} />
+          : <><h2>{sectionName ?? "Sin subsección"}</h2><small>{items.length} análisis</small></>}</div>
+        {editableSection && section && <div>{renamingSubsectionId === section.id
+          ? <><button type="button" className="text-button" onClick={() => void renameSubsection(section)}>Guardar</button><button type="button" className="text-button" onClick={() => setRenamingSubsectionId("")}>Cancelar</button></>
+          : <>{storedSection && <><button type="button" className="icon-button" title="Subir subsección" onClick={() => void moveSubsection(section, -1)} aria-label={`Subir ${section.name}`}><ArrowUp /></button><button type="button" className="icon-button" title="Bajar subsección" onClick={() => void moveSubsection(section, 1)} aria-label={`Bajar ${section.name}`}><ArrowDown /></button></>}<button type="button" className="icon-button" title="Editar nombre" onClick={() => { setRenamingSubsectionId(section.id); setRenamingSubsectionName(section.name); }} aria-label={`Editar ${section.name}`}><Pencil /></button><button type="button" className="icon-button danger-text" title="Eliminar subsección" onClick={() => void deleteSubsection(section)} aria-label={`Eliminar ${section.name}`}><Trash2 /></button></>}</div>}
+      </header>
+      <div className="catalog-analysis-grid">{items.map((analysis, index) => <article draggable={!query && activeGroup?.persisted} onDragStart={() => setDraggedAnalysisId(analysis.id)} onDragEnd={() => setDraggedAnalysisId("")} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.stopPropagation(); dropAnalysis(sectionName, analysis.id); }} className={draggedAnalysisId === analysis.id ? "catalog-analysis-card dragging" : "catalog-analysis-card"} key={analysis.id}>
+        <button type="button" className="catalog-drag-handle" aria-label={`Mover ${analysis.name}`} title="Arrastra para mover"><GripVertical /></button>
+        <div className="catalog-analysis-copy"><strong>{analysis.name}</strong><small>{analysis.resultType === "numeric" ? `${analysis.unit || "Sin unidad"} · ${formatReferenceRange(analysis.reference)}` : analysis.resultType === "qualitative" ? analysis.qualitativeOptions?.join(" · ") || "Selección" : "Texto libre"}</small></div>
+        <div className="catalog-card-actions"><button type="button" className="icon-button" title="Subir análisis" disabled={!activeGroup?.persisted || Boolean(query) || index === 0} onClick={() => moveAnalysis(analysis, -1)} aria-label={`Subir ${analysis.name}`}><ArrowUp /></button><button type="button" className="icon-button" title="Bajar análisis" disabled={!activeGroup?.persisted || Boolean(query) || index === items.length - 1} onClick={() => moveAnalysis(analysis, 1)} aria-label={`Bajar ${analysis.name}`}><ArrowDown /></button><button type="button" className="icon-button" title="Editar análisis" disabled={!analysis.groupId} onClick={() => setEditingAnalysis(analysis)} aria-label={`Editar ${analysis.name}`}><Pencil /></button><button type="button" className="icon-button danger-text" title="Eliminar análisis" onClick={() => void archiveAnalysis(analysis)} aria-label={`Eliminar ${analysis.name}`}><Trash2 /></button></div>
+      </article>)}{items.length === 0 && <div className="catalog-empty-drop">{query ? "No hay coincidencias en esta subsección" : "Arrastra aquí los análisis de esta subsección"}</div>}</div>
+    </section>;
+  };
+
   return <>
-    <PageHead eyebrow="Gobierno clínico" title="Catálogo de análisis" text="Los elementos importados deben revisarse antes de usarse en una orden." />
-    <div className="catalog-summary"><span><FlaskConical /><strong>{analyses.length - archived}</strong> análisis activos</span><span><Database /><strong>{groups.size}</strong> grupos</span><span><BookOpenCheck /><strong>{archived}</strong> por revisar</span></div>
-    <article className="panel"><div className="table-actions"><div className="compact-search"><Search /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Buscar código o análisis…" aria-label="Buscar en el catálogo" /></div><select value={group} onChange={(event) => { setGroup(event.target.value); setPage(1); }} aria-label="Filtrar catálogo por grupo"><option value="">Todos los grupos</option>{[...groups].sort().map((name) => <option key={name}>{name}</option>)}</select></div><div className="table-wrap"><table><thead><tr><th>Código</th><th>Análisis</th><th>Grupo</th><th>Tipo</th><th>Unidad</th><th>Método</th><th>Referencia</th><th>Estado</th><th /></tr></thead><tbody>{pagedAnalyses.map((a) => <tr key={a.id}><td className="mono strong">{a.code}</td><td><strong>{a.name}</strong></td><td>{a.group}</td><td>{a.active ? (a.resultType === "numeric" ? "Numérico" : a.resultType === "qualitative" ? "Cualitativo" : "Texto") : "Por definir"}</td><td className="mono">{a.unit || "—"}</td><td>{a.method || "—"}</td><td className="mono">{a.active ? formatReferenceRange(a.reference) : "Pendiente"}</td><td><span className={`status ${a.active ? "validated" : "pending_validation"}`}>{a.active ? "Activo" : "Revisión pendiente"}</span></td><td><button className="text-button" onClick={() => setSelected(a)}>{a.active ? "Nueva versión" : "Revisar"} <ChevronRight /></button></td></tr>)}</tbody></table></div><footer className="catalog-pagination"><span>Mostrando {visible.length ? (currentPage - 1) * 20 + 1 : 0}–{Math.min(currentPage * 20, visible.length)} de {visible.length}</span><div><button type="button" className="button secondary" disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ArrowLeft />Atrás</button><strong>Página {currentPage} de {pageCount}</strong><button type="button" className="button secondary" disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Siguiente<ChevronRight /></button></div></footer></article>
-    {selected && <CatalogApprovalDialog analysis={selected} close={() => setSelected(null)} />}
+    <PageHead compact eyebrow="Catálogo" title="Catálogo" text="Ordena y configura los análisis." action={<div className="catalog-page-actions"><button className="button secondary" onClick={() => { setGroupEditor("create"); setGroupName(""); }}><Plus />Nueva sección</button><button className="button primary" disabled={!activeGroup?.persisted} onClick={() => setCreatingAnalysis(true)}><Plus />Nuevo análisis</button></div>} />
+    {message && <p className={`catalog-message ${message.type}`} role="status">{message.type === "success" ? <Check /> : <CircleAlert />}{message.text}</p>}
+    <article className="catalog-editor">
+      <div className="catalog-group-manager"><strong>Secciones</strong>{groupEditor
+        ? <form onSubmit={saveGroup}><input autoFocus value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder={groupEditor === "create" ? "Nombre de la nueva sección" : "Nombre de la sección"} aria-label="Nombre de la sección" /><button className="text-button" disabled={saving || groupName.trim().length < 2}>Guardar</button><button type="button" className="text-button" onClick={() => setGroupEditor(null)}>Cancelar</button></form>
+        : <div><button type="button" className="icon-button" title="Editar sección" disabled={!activeGroup?.persisted} onClick={() => { if (activeGroup) { setGroupEditor("rename"); setGroupName(activeGroup.name); } }} aria-label="Editar sección"><Pencil /></button><button type="button" className="icon-button danger-text" title="Eliminar sección" disabled={!activeGroup?.persisted} onClick={() => void archiveGroup()} aria-label="Eliminar sección"><Trash2 /></button></div>}</div>
+      <nav className="entry-group-tabs catalog-group-tabs" aria-label="Grupos del catálogo">{groups.map((group) => <button type="button" key={group.id} className={group.id === activeGroup?.id ? "active" : ""} onClick={() => { setActiveGroupId(group.id); setQuery(""); }}>{resultGroupEmoji(group.name)} {group.name}<b>{localAnalyses.filter((analysis) => analysis.active && analysisBelongsToCatalogGroup(analysis, group)).length}</b></button>)}</nav>
+      {activeGroup && <>
+        {!activeGroup.persisted && <p className="catalog-compat-note"><CircleAlert />Los análisis ya están disponibles. Conéctate para habilitar los cambios del catálogo.</p>}
+        <div className="catalog-editor-tools"><div className="compact-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar análisis en este grupo" aria-label="Buscar análisis en este grupo" /></div><form onSubmit={createSubsection}><input value={newSubsectionName} onChange={(event) => setNewSubsectionName(event.target.value)} placeholder="Nombre de nueva subsección" aria-label="Nombre de nueva subsección" /><button className="button secondary" disabled={saving || newSubsectionName.trim().length < 2}><Plus />Crear subsección</button></form></div>
+        <div className="catalog-sections">{renderSection(null)}{activeSections.map((section) => renderSection(section))}</div>
+      </>}
+    </article>
+    {(editingAnalysis || creatingAnalysis) && activeGroup?.persisted && <CatalogAnalysisDialog analysis={editingAnalysis} initialGroupId={editingAnalysis?.groupId ?? activeGroup.id} groups={groups.filter((group) => group.persisted)} subsections={localSubsections} close={() => { setEditingAnalysis(null); setCreatingAnalysis(false); }} saved={async () => { setEditingAnalysis(null); setCreatingAnalysis(false); setMessage({ type: "success", text: editingAnalysis ? "Análisis actualizado." : "Análisis creado." }); await refreshCatalog(); }} />}
   </>;
 }
 
-function CatalogApprovalDialog({ analysis, close }: { analysis: LabData["analyses"][number]; close: () => void }) {
-  const router = useRouter();
+function CatalogAnalysisDialog({ analysis, initialGroupId, groups, subsections, close, saved }: { analysis: AnalysisDefinition | null; initialGroupId: string; groups: { id: string; name: string }[]; subsections: CatalogSubsection[]; close: () => void; saved: () => Promise<void> }) {
   const offlineRepository = useOfflineRepository();
-  const [resultType, setResultType] = useState<"numeric" | "qualitative" | "text">(analysis.active ? analysis.resultType : "numeric");
-  const [sampleType, setSampleType] = useState(analysis.sampleType ?? "");
-  const [method, setMethod] = useState(analysis.method ?? "");
-  const [unit, setUnit] = useState(analysis.unit ?? "");
-  const [decimals, setDecimals] = useState(String(analysis.decimals ?? 2));
-  const [referenceLabel, setReferenceLabel] = useState(analysis.active ? analysis.reference : "");
-  const [referenceLow, setReferenceLow] = useState("");
-  const [referenceHigh, setReferenceHigh] = useState("");
-  const [criticalLow, setCriticalLow] = useState("");
-  const [criticalHigh, setCriticalHigh] = useState("");
-  const [options, setOptions] = useState(analysis.qualitativeOptions?.join(", ") ?? "Negativo, Positivo");
+  const [name, setName] = useState(analysis?.name ?? "");
+  const [groupId, setGroupId] = useState(analysis?.groupId ?? initialGroupId);
+  const [subsection, setSubsection] = useState(analysis?.subsection ?? "");
+  const [resultType, setResultType] = useState<"numeric" | "qualitative" | "text">(analysis?.resultType ?? "numeric");
+  const [sampleType, setSampleType] = useState(analysis?.sampleType ?? "");
+  const [method, setMethod] = useState(analysis?.method ?? "");
+  const [unit, setUnit] = useState(analysis?.unit ?? "");
+  const [decimals, setDecimals] = useState(String(analysis?.decimals ?? 2));
+  const [referenceLabel, setReferenceLabel] = useState(analysis?.reference === "Por definir" ? "" : analysis?.reference ?? "");
+  const [referenceLow, setReferenceLow] = useState(analysis?.low === undefined ? "" : String(analysis.low));
+  const [referenceHigh, setReferenceHigh] = useState(analysis?.high === undefined ? "" : String(analysis.high));
+  const [criticalLow, setCriticalLow] = useState(analysis?.criticalLow === undefined ? "" : String(analysis.criticalLow));
+  const [criticalHigh, setCriticalHigh] = useState(analysis?.criticalHigh === undefined ? "" : String(analysis.criticalHigh));
+  const [options, setOptions] = useState(analysis?.qualitativeOptions?.join(", ") ?? "Negativo, Positivo");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const availableSubsections = subsections.filter((section) => section.groupId === groupId);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
-    if (offlineRepository && !offlineRepository.online) return setError("La aprobación del catálogo requiere conexión.");
+    if (offlineRepository && !offlineRepository.online) return setError("Editar el catálogo requiere conexión a internet.");
+    if (name.trim().length < 2) return setError("Escribe el nombre del análisis.");
     if (sampleType.trim().length < 2) return setError("Indica el tipo de muestra.");
     const parsedOptions = options.split(",").map((option) => option.trim()).filter(Boolean);
     const range: Record<string, string | number> = { label: referenceLabel.trim() };
     if (referenceLow.trim()) range.low = Number(referenceLow);
     if (referenceHigh.trim()) range.high = Number(referenceHigh);
-    if (resultType === "numeric" && (!range.label || (range.low === undefined && range.high === undefined))) {
-      return setError("Indica la etiqueta y al menos un límite de referencia.");
-    }
+    if (resultType === "numeric" && (!range.label || (range.low === undefined && range.high === undefined))) return setError("Indica el texto y al menos un límite de referencia.");
     const critical: Record<string, number> = {};
     if (criticalLow.trim()) critical.low = Number(criticalLow);
     if (criticalHigh.trim()) critical.high = Number(criticalHigh);
     setSaving(true);
-    const response = await createClient().rpc("approve_analysis_version", {
-      target_analysis: analysis.id,
-      approved_result_type: resultType,
-      approved_sample_type: sampleType.trim(),
-      approved_method: method.trim() || null,
-      approved_unit: unit.trim() || null,
-      approved_decimals: resultType === "numeric" ? Number(decimals) : null,
-      approved_qualitative_options: resultType === "qualitative" ? parsedOptions : null,
-      approved_reference_ranges: resultType === "numeric" ? [range] : [],
-      approved_critical_limits: critical,
-    });
-    setSaving(false);
-    if (response.error) return setError(rpcMessage(response.error.message));
-    close();
-    router.refresh();
+    try {
+      await catalogRequest({ action: "analysis.save", analysisId: analysis?.id ?? null, groupId, subsection: subsection || null, name: name.trim(), resultType, sampleType: sampleType.trim(), method: method.trim() || null, unit: resultType === "numeric" ? unit.trim() || null : null, decimals: resultType === "numeric" ? Number(decimals) : null, qualitativeOptions: resultType === "qualitative" ? parsedOptions : null, referenceRanges: referenceLabel.trim() ? [range] : [], criticalLimits: critical });
+      await saved();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "No se pudo guardar el análisis.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
-    <section className="dialog-card catalog-dialog" role="dialog" aria-modal="true" aria-labelledby="catalog-review-title">
-      <div className="dialog-head"><div><p className="eyebrow">Aprobación clínica</p><h2 id="catalog-review-title">{analysis.name}</h2><p>{analysis.code} · {analysis.group}. Crear una versión nueva no altera informes anteriores.</p></div><button className="icon-button" onClick={close} aria-label="Cerrar"><X /></button></div>
+    <section className="dialog-card catalog-dialog" role="dialog" aria-modal="true" aria-labelledby="catalog-analysis-title">
+      <div className="dialog-head"><div><p className="eyebrow">{analysis ? "Editar análisis" : "Nuevo análisis"}</p><h2 id="catalog-analysis-title">{analysis?.name ?? "Agregar al catálogo"}</h2><p>Los informes anteriores conservarán la información con la que fueron emitidos.</p></div><button className="icon-button" type="button" onClick={close} aria-label="Cerrar"><X /></button></div>
       <form onSubmit={submit}>
-        <div className="dialog-fields">
-          <label>Tipo de resultado<select value={resultType} onChange={(event) => setResultType(event.target.value as typeof resultType)}><option value="numeric">Numérico</option><option value="qualitative">Cualitativo</option><option value="text">Texto libre</option></select></label>
-          <label>Tipo de muestra<input value={sampleType} onChange={(event) => setSampleType(event.target.value)} placeholder="Suero, sangre, orina…" /></label>
-          <label>Método<input value={method} onChange={(event) => setMethod(event.target.value)} placeholder="Método aprobado" /></label>
-          {resultType === "numeric" && <><label>Unidad<input value={unit} onChange={(event) => setUnit(event.target.value)} placeholder="mg/dL, %, células/mm³…" /></label><label>Decimales<input type="number" min="0" max="8" value={decimals} onChange={(event) => setDecimals(event.target.value)} /></label></>}
-        </div>
-        {resultType === "numeric" && <fieldset className="clinical-fields"><legend>Intervalo de referencia</legend><label>Texto para el informe<input value={referenceLabel} onChange={(event) => setReferenceLabel(event.target.value)} placeholder="70–110 mg/dL" /></label><div className="dialog-fields"><label>Límite bajo<input type="number" step="any" value={referenceLow} onChange={(event) => setReferenceLow(event.target.value)} /></label><label>Límite alto<input type="number" step="any" value={referenceHigh} onChange={(event) => setReferenceHigh(event.target.value)} /></label><label>Crítico bajo (opcional)<input type="number" step="any" value={criticalLow} onChange={(event) => setCriticalLow(event.target.value)} /></label><label>Crítico alto (opcional)<input type="number" step="any" value={criticalHigh} onChange={(event) => setCriticalHigh(event.target.value)} /></label></div><p className="form-help">Esta primera versión aplica a todas las edades y sexos. Crea versiones segmentadas antes de producción cuando corresponda.</p></fieldset>}
-        {resultType === "qualitative" && <label>Opciones permitidas<input value={options} onChange={(event) => setOptions(event.target.value)} placeholder="Negativo, Positivo" /><small className="form-help">Sepáralas con comas. El usuario elegirá una opción, no escribirá texto libre.</small></label>}
-        {resultType === "text" && <p className="compat-note"><ShieldCheck />El resultado será texto libre y no tendrá banderas automáticas.</p>}
+        <div className="dialog-fields"><label>Nombre del análisis<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label><label>Grupo<select value={groupId} onChange={(event) => { setGroupId(event.target.value); setSubsection(""); }}>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label><label>Subsección<select value={subsection} onChange={(event) => setSubsection(event.target.value)}><option value="">Sin subsección</option>{availableSubsections.map((section) => <option key={section.id}>{section.name}</option>)}</select></label><label>Tipo de resultado<select value={resultType} onChange={(event) => setResultType(event.target.value as typeof resultType)}><option value="numeric">Numérico</option><option value="qualitative">Selección</option><option value="text">Texto libre</option></select></label><label>Tipo de muestra<input value={sampleType} onChange={(event) => setSampleType(event.target.value)} placeholder="Suero, sangre, orina…" /></label><label>Método<input value={method} onChange={(event) => setMethod(event.target.value)} /></label>{resultType === "numeric" && <><label>Unidad<input value={unit} onChange={(event) => setUnit(event.target.value)} placeholder="mg/dL, %, por campo…" /></label><label>Decimales<input type="number" min="0" max="8" value={decimals} onChange={(event) => setDecimals(event.target.value)} /></label></>}</div>
+        {resultType === "numeric" && <fieldset className="clinical-fields"><legend>Valores normales</legend><label>Texto que aparecerá en el informe<input value={referenceLabel} onChange={(event) => setReferenceLabel(event.target.value)} placeholder="70 - 110 mg/dL" /></label><div className="dialog-fields"><label>Límite bajo<input type="number" step="any" value={referenceLow} onChange={(event) => setReferenceLow(event.target.value)} /></label><label>Límite alto<input type="number" step="any" value={referenceHigh} onChange={(event) => setReferenceHigh(event.target.value)} /></label><label>Crítico bajo (opcional)<input type="number" step="any" value={criticalLow} onChange={(event) => setCriticalLow(event.target.value)} /></label><label>Crítico alto (opcional)<input type="number" step="any" value={criticalHigh} onChange={(event) => setCriticalHigh(event.target.value)} /></label></div></fieldset>}
+        {resultType === "qualitative" && <><label>Opciones permitidas<input value={options} onChange={(event) => setOptions(event.target.value)} placeholder="Negativo, Positivo" /><small className="form-help">Separa cada opción con una coma.</small></label><label>Valor normal para el informe<input value={referenceLabel} onChange={(event) => setReferenceLabel(event.target.value)} placeholder="Negativo" /></label></>}
+        {resultType === "text" && <label>Valor normal para el informe (opcional)<input value={referenceLabel} onChange={(event) => setReferenceLabel(event.target.value)} /></label>}
         {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="dialog-actions"><span>Requiere aprobación del responsable clínico</span><div><button type="button" className="button secondary" onClick={close}>Cancelar</button><button className="button primary" disabled={saving}>{saving ? "Guardando…" : "Aprobar y activar"}</button></div></div>
+        <div className="dialog-actions"><span>Disponible para nuevos registros al guardar</span><div><button type="button" className="button secondary" onClick={close}>Cancelar</button><button className="button primary" disabled={saving}>{saving ? "Guardando…" : "Guardar análisis"}</button></div></div>
       </form>
     </section>
   </div>;

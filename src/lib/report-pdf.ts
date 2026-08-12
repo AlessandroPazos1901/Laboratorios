@@ -32,7 +32,8 @@ export type LabReportResult = {
   analysisOrder?: number;
 };
 
-export type LabReportTableRow = ResultPresentationRow<LabReportResult>;
+export type LabReportTableRow = ResultPresentationRow<LabReportResult>
+  | { kind: "title"; label: string };
 
 export type LabReportData = {
   orderNumber: number;
@@ -51,8 +52,27 @@ const clean = (value: unknown) => String(value ?? "")
   .replace(/[–—]/g, "-")
   .replace(/[^ -~ -ÿ\n]/g, "-");
 
+const normalizeReportLabel = (value: string) => value
+  .normalize("NFD")
+  .replace(/\p{Diacritic}/gu, "")
+  .toUpperCase()
+  .replace(/[^A-Z0-9]+/g, " ")
+  .trim();
+
+function reportGroupTitle(group: string) {
+  return normalizeReportLabel(group).includes("UROANAL") ? "SECCIÓN: ORINAS" : group;
+}
+
 export function buildReportTableRows(results: LabReportResult[]): LabReportTableRow[] {
-  return buildResultPresentationRows(results);
+  const rows: LabReportTableRow[] = buildResultPresentationRows(results);
+  const urinalysis = results.some((result) => normalizeReportLabel(result.group).includes("UROANAL"));
+  if (!urinalysis) return rows;
+  return [
+    { kind: "title", label: "EXAMEN COMPLETO DE ORINA" },
+    ...rows.map((row) => row.kind === "section" && row.label === "EXAMEN BIOQUÍMICO"
+      ? { ...row, label: "EXAMEN QUÍMICO" }
+      : row),
+  ];
 }
 
 export function formatReportUnit(unit: string, analysisCode?: string) {
@@ -137,7 +157,7 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
     start: { x, y: bottom }, end: { x, y: top - titleHeight }, thickness: 0.8, color: INK,
   }));
 
-  const title = clean(`${group}${continuation ? " - CONTINUACION" : ""}`).toUpperCase();
+  const title = clean(`${reportGroupTitle(group)}${continuation ? " - CONTINUACION" : ""}`).toUpperCase();
   page.drawText(title, {
     x: MARGIN + (CONTENT_WIDTH - bold.widthOfTextAtSize(title, 10)) / 2,
     y: top - 16,
@@ -161,6 +181,10 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
 }
 
 function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont) {
+  if (row.kind === "title") {
+    const lines = splitText(row.label, bold, 9, CONTENT_WIDTH - 12);
+    return Math.max(23, lines.length * 10 + 9);
+  }
   if (row.kind === "section") {
     const lines = splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12);
     return Math.max(22, lines.length * 10 + 8);
@@ -175,6 +199,10 @@ function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont
 
 function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height: number, regular: PDFFont, bold: PDFFont) {
   const bottom = top - height;
+  if (row.kind === "title") {
+    drawLines(page, splitText(row.label, bold, 9, CONTENT_WIDTH - 12), MARGIN + 6, top - 15, bold, 9, INK, 10);
+    return bottom;
+  }
   if (row.kind === "section") {
     page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height, color: SECTION_HEADER });
     drawLines(page, splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12), MARGIN + 6, top - 14, bold, 8.5, INK, 10);
@@ -235,10 +263,13 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
   for (const [group, results] of groupResults(data.results)) {
     const rows = buildReportTableRows(results);
     const firstRowHeight = rows[0] ? measureTableRow(rows[0], regular, bold) : 0;
-    const firstResultHeight = rows[0]?.kind === "section" && rows[1]
-      ? measureTableRow(rows[1], regular, bold)
-      : 0;
-    const minimumGroupHeight = 12 + 49 + firstRowHeight + firstResultHeight;
+    const firstFollowingRows = rows[0]?.kind === "title"
+      ? rows.slice(1, 3)
+      : rows[0]?.kind === "section"
+        ? rows.slice(1, 2)
+        : [];
+    const minimumGroupHeight = 12 + 49 + firstRowHeight
+      + firstFollowingRows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
     const rowsHeight = rows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
     const requiredHeight = rowsHeight <= freshBodySpace ? 12 + 49 + rowsHeight : minimumGroupHeight;
     if (!page || y - requiredHeight < 58) addPage(group);
@@ -246,9 +277,12 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowHeight = measureTableRow(row, regular, bold);
-      const nextHeight = row.kind === "section" && rows[index + 1]
-        ? measureTableRow(rows[index + 1], regular, bold)
-        : 0;
+      const followingRows = row.kind === "title"
+        ? rows.slice(index + 1, index + 3)
+        : row.kind === "section"
+          ? rows.slice(index + 1, index + 2)
+          : [];
+      const nextHeight = followingRows.reduce((total, followingRow) => total + measureTableRow(followingRow, regular, bold), 0);
       if (y - rowHeight - nextHeight < 58) addPage(group, true);
       y = drawTableRow(page!, row, y, rowHeight, regular, bold);
     }

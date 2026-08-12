@@ -142,3 +142,93 @@ export function linkedHematologyValues(sourceCode: string, rawValue: string) {
     "HEM-HCT": conciseDecimal(hemoglobin * 3),
   };
 }
+
+export function isCalculatedHematologyResult(code: string, name = "", group = "") {
+  const normalizedCode = code.trim().toUpperCase();
+  if (normalizedCode === "HEM-RBC" || normalizedCode === "HEM-HB") return true;
+  if (!normalizeAnalysisLabel(group).includes("HEMATOLOG")) return false;
+  const normalizedName = name.normalize("NFD").replace(/\p{Diacritic}/gu, "").toUpperCase();
+  return normalizedName.includes("HEMATIES") || normalizedName.includes("HEMOGLOBINA") || normalizedName.includes("GLOBULOS ROJOS");
+}
+
+export type BiochemistryFormulaKey =
+  | "BIO-CHOL" | "BIO-HDL" | "BIO-LDL" | "BIO-VLDL" | "BIO-TG"
+  | "BIO-BT" | "BIO-BD" | "BIO-BI"
+  | "BIO-PROT" | "BIO-ALB" | "BIO-GLOB";
+
+const biochemistryFormulaCodes = new Set<BiochemistryFormulaKey>([
+  "BIO-CHOL", "BIO-HDL", "BIO-LDL", "BIO-VLDL", "BIO-TG",
+  "BIO-BT", "BIO-BD", "BIO-BI",
+  "BIO-PROT", "BIO-ALB", "BIO-GLOB",
+]);
+
+const normalizeAnalysisLabel = (value: string) => value
+  .normalize("NFD")
+  .replace(/\p{Diacritic}/gu, "")
+  .toUpperCase()
+  .replace(/[^A-Z0-9]+/g, " ")
+  .trim();
+
+export function biochemistryFormulaKey(code: string, name = "", group = ""): BiochemistryFormulaKey | null {
+  const normalizedCode = code.trim().toUpperCase() as BiochemistryFormulaKey;
+  if (biochemistryFormulaCodes.has(normalizedCode)) return normalizedCode;
+  if (!normalizeAnalysisLabel(group).includes("BIOQUIM")) return null;
+  const label = normalizeAnalysisLabel(name);
+  if (label.includes("VLDL")) return "BIO-VLDL";
+  if (label.includes("HDL")) return "BIO-HDL";
+  if (label.includes("LDL")) return "BIO-LDL";
+  if (label.includes("TRIGLICER")) return "BIO-TG";
+  if (label.includes("COLESTEROL") && label.includes("TOTAL")) return "BIO-CHOL";
+  if (label.includes("BILIRRUBINA") && label.includes("INDIRECT")) return "BIO-BI";
+  if (label.includes("BILIRRUBINA") && label.includes("DIRECT")) return "BIO-BD";
+  if ((label.includes("BILIRRUBINA") && label.includes("TOTAL")) || label === "B TOTAL") return "BIO-BT";
+  if (label.includes("PROTEINA") && label.includes("TOTAL")) return "BIO-PROT";
+  if (label.includes("ALBUMINA")) return "BIO-ALB";
+  if (label.includes("GLOBULINA")) return "BIO-GLOB";
+  return null;
+}
+
+function numericFormulaValue(value: string | undefined) {
+  if (!value?.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function linkedBiochemistryValues(
+  sourceKey: BiochemistryFormulaKey,
+  rawValue: string,
+  currentValues: Partial<Record<BiochemistryFormulaKey, string>>,
+) {
+  const values = { ...currentValues, [sourceKey]: rawValue };
+  const calculated: Partial<Record<BiochemistryFormulaKey, string>> = {};
+  const setValue = (key: BiochemistryFormulaKey, value: number | null) => {
+    calculated[key] = value === null ? "" : conciseDecimal(value);
+    values[key] = calculated[key];
+  };
+
+  if (["BIO-CHOL", "BIO-HDL", "BIO-VLDL", "BIO-TG"].includes(sourceKey)) {
+    const cholesterol = numericFormulaValue(values["BIO-CHOL"]);
+    const triglycerides = numericFormulaValue(values["BIO-TG"]);
+    if (sourceKey === "BIO-CHOL" || sourceKey === "BIO-TG") {
+      setValue("BIO-HDL", cholesterol === null ? null : cholesterol * 0.17);
+      setValue("BIO-VLDL", triglycerides === null ? null : triglycerides / 5);
+    }
+    const hdl = numericFormulaValue(values["BIO-HDL"]);
+    const vldl = numericFormulaValue(values["BIO-VLDL"]);
+    setValue("BIO-LDL", cholesterol !== null && hdl !== null && vldl !== null ? cholesterol - vldl - hdl : null);
+  }
+
+  if (sourceKey === "BIO-BT" || sourceKey === "BIO-BD") {
+    const total = numericFormulaValue(values["BIO-BT"]);
+    const direct = numericFormulaValue(values["BIO-BD"]);
+    setValue("BIO-BI", total !== null && direct !== null ? total - direct : null);
+  }
+
+  if (sourceKey === "BIO-PROT" || sourceKey === "BIO-ALB") {
+    const proteins = numericFormulaValue(values["BIO-PROT"]);
+    const albumin = numericFormulaValue(values["BIO-ALB"]);
+    setValue("BIO-GLOB", proteins !== null && albumin !== null ? proteins - albumin : null);
+  }
+
+  return calculated;
+}

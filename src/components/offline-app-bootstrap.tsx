@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, CloudOff, Database, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, Trash2, Wifi } from "lucide-react";
+import { Activity, CloudOff, Database, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { LabApp } from "@/components/lab-app";
@@ -94,11 +94,8 @@ export function OfflineAppBootstrap() {
   const [bundle, setBundle] = useState<SyncBundle | null>(null);
   const [session, setSession] = useState<UnlockedVault | null>(null);
   const [meta, setMeta] = useState<OfflineVaultMeta | null>(null);
-  const [pendingCount, setPendingCount] = useState(0);
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
-  const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState("");
-  const [updateAvailable, setUpdateAvailable] = useState(false);
   const syncRequested = useRef(0);
   const syncingRef = useRef(false);
 
@@ -124,7 +121,6 @@ export function OfflineAppBootstrap() {
       listOfflineOperations(active, ["pending", "syncing", "blocked"]),
       listOfflineConflicts(active),
     ]);
-    setPendingCount(operations.length);
     setConflicts(storedConflicts);
     return operations;
   }, []);
@@ -150,7 +146,6 @@ export function OfflineAppBootstrap() {
     if (!active || !navigator.onLine || syncingRef.current) return;
     let working: UnlockedVault = { ...active, meta: { ...active.meta }, snapshot: active.snapshot };
     syncingRef.current = true;
-    setSyncing(true);
     setMessage("");
     try {
       if (new Date(working.meta.lease.expiresAt).getTime() - Date.now() < 12 * 60 * 60 * 1000) {
@@ -214,7 +209,6 @@ export function OfflineAppBootstrap() {
       await refreshCounters(working);
     } finally {
       syncingRef.current = false;
-      setSyncing(false);
     }
   }, [fetchBundle, refreshCounters, session]);
 
@@ -285,19 +279,6 @@ export function OfflineAppBootstrap() {
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
   }, [performSync, session]);
-
-  useEffect(() => {
-    const registrationPromise = navigator.serviceWorker?.ready;
-    if (!registrationPromise) return;
-    void registrationPromise.then((registration) => {
-      if (registration.waiting) setUpdateAvailable(true);
-      registration.addEventListener("updatefound", () => {
-        registration.installing?.addEventListener("statechange", () => {
-          if (registration.waiting) setUpdateAvailable(true);
-        });
-      });
-    });
-  }, []);
 
   const requestSync = () => {
     syncRequested.current += 1;
@@ -428,25 +409,6 @@ export function OfflineAppBootstrap() {
     requestSync={requestSync}
   >
     <div className="offline-runtime-shell">
-      <OfflineStatusBar
-        online={online}
-        prepared={Boolean(session)}
-        syncing={syncing}
-        pending={pendingCount}
-        conflicts={conflicts.length}
-        lastSyncAt={meta?.lastSyncAt}
-        message={message}
-        updateAvailable={updateAvailable}
-        sync={() => void performSync()}
-        lock={() => { setSession(null); setData(null); setCurrentUser(null); setStatus("locked"); }}
-        deleteVault={deleteVault}
-        activateUpdate={async () => {
-          if (pendingCount) return setMessage("Guarda los cambios pendientes antes de instalar la actualización.");
-          const registration = await navigator.serviceWorker.ready;
-          registration.waiting?.postMessage({ type: "SKIP_WAITING" });
-          window.location.reload();
-        }}
-      />
       {status === "not-prepared" && bundle && <EnrollPanel enroll={enroll} />}
       {conflicts.length > 0 && <ConflictPanel conflicts={conflicts} data={data} acceptRemote={acceptRemote} retryLocal={retryLocal} />}
       <LabApp data={data} currentUser={{ fullName: currentUser.fullName, role: currentUser.role }} />
@@ -473,10 +435,6 @@ function UnlockGate(props: { meta: OfflineVaultMeta; expired: boolean; online: b
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   return <main className="offline-gate"><section><span>{props.expired ? <CloudOff /> : <LockKeyhole />}</span><p className="eyebrow">{props.meta.deviceName}</p><h1>{props.expired ? "Conecta este equipo para continuar" : "Datos protegidos"}</h1><p>{props.expired ? "Conecta el equipo a internet una vez para volver a abrir los datos." : `Puedes trabajar sin internet hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`}</p>{props.message && <p className="compat-note">{props.message}</p>}{!props.expired && <><label>PIN<input autoFocus type="password" inputMode="numeric" autoComplete="off" maxLength={32} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 32))} onKeyDown={(event) => { if (event.key === "Enter") (event.currentTarget.nextElementSibling as HTMLButtonElement | null)?.click(); }} /></label><button className="button primary wide" disabled={loading || !PIN_PATTERN.test(pin)} onClick={async () => { setLoading(true); setError(""); try { await props.unlock(pin); } catch (reason) { setError(reason instanceof Error && reason.message === "offline_pin_incorrect" ? "PIN incorrecto." : "No se pudieron abrir los datos."); } finally { setLoading(false); } }}><KeyRound />{loading ? "Abriendo…" : "Abrir datos"}</button></>}{props.expired && <button className="button primary wide" disabled={!props.online || loading} onClick={async () => { setLoading(true); setError(""); try { await props.renew(); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo preparar el equipo."); } finally { setLoading(false); } }}><RefreshCw />{props.online ? "Habilitar por 72 horas" : "Conecta este equipo"}</button>}{error && <p className="form-error">{error}</p>}<button className="text-button danger-text" onClick={() => void props.deleteVault()}><Trash2 />Eliminar los datos guardados en este equipo</button></section></main>;
-}
-
-function OfflineStatusBar(props: { online: boolean; prepared: boolean; syncing: boolean; pending: number; conflicts: number; lastSyncAt?: string; message: string; updateAvailable: boolean; sync(): void; lock(): void; deleteVault(): void; activateUpdate(): void }) {
-  return <div className="offline-status-bar"><span className={props.online ? "online" : "offline"}>{props.online ? <Wifi /> : <CloudOff />}{props.online ? "Con internet" : "Sin internet"}</span><span><Database />{props.prepared ? `${props.pending} por enviar · ${props.conflicts} por revisar` : "Equipo no preparado"}</span>{props.lastSyncAt && <small>Último envío: {new Date(props.lastSyncAt).toLocaleString("es-PE")}</small>}{props.message && <small>{props.message}</small>}<div>{props.prepared && <button className="text-button" disabled={!props.online || props.syncing} onClick={props.sync}><RefreshCw className={props.syncing ? "spin" : ""} />{props.syncing ? "Guardando…" : "Guardar cambios"}</button>}{props.updateAvailable && <button className="text-button" onClick={props.activateUpdate}>Instalar actualización</button>}{props.prepared && <button className="text-button" onClick={props.lock}><LockKeyhole />Bloquear</button>}</div></div>;
 }
 
 function ConflictPanel(props: { conflicts: SyncConflict[]; data: LabData; acceptRemote(conflict: SyncConflict): Promise<void>; retryLocal(conflict: SyncConflict): Promise<void> }) {

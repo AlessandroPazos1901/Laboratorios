@@ -57,7 +57,7 @@ export type OfflineRepository = {
     entries: LocalRegistrationEntry[];
   }): Promise<string>;
   saveResults(order: LabOrder, results: ResultValue[]): Promise<{ lockVersion: number; results: ResultValue[] }>;
-  buildOfflineReport(order: LabOrder, batchId: string): Promise<Blob | null>;
+  buildOfflineReport(order: LabOrder, batchId: string, includedResultIds: string[]): Promise<Blob | null>;
   previewPatientRoster(file: File): Promise<PatientRosterPreview>;
   importPatientRoster(input: {
     file: File;
@@ -310,9 +310,10 @@ export function OfflineRepositoryProvider(props: {
       await commit(nextData, operation);
       return { lockVersion: order.lockVersion, results };
     },
-    async buildOfflineReport(order, batchId) {
+    async buildOfflineReport(order, batchId, includedResultIds) {
       if (!props.session) return null;
-      const results = order.results.filter((result) => result.batchId === batchId);
+      const included = new Set(includedResultIds);
+      const results = order.results.filter((result) => result.batchId === batchId && included.has(result.orderAnalysisId));
       if (!results.length || results.some((result) => !result.value.trim())) throw new Error("all_batch_results_required");
       const analysisByVersion = new Map(props.data.analyses.map((analysis) => [analysis.versionId, analysis]));
       const logo = new Uint8Array(await (await fetch("/logo_laboratorio.png")).arrayBuffer());

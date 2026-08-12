@@ -39,7 +39,7 @@ describe("buildLabReportPdf", () => {
       reportResult("HEM-PLT", "PLAQUETAS"),
       reportResult("HEM-VSG", "V.S.G."),
     ]);
-    expect(rows.map((row) => row.kind === "section" ? `S:${row.label}` : `R:${row.result.analysis}:${row.indent}`)).toEqual([
+    expect(rows.map((row) => row.kind === "result" ? `R:${row.result.analysis}:${row.indent}` : `${row.kind === "title" ? "T" : "S"}:${row.label}`)).toEqual([
       "S:HEMOGRAMA COMPLETO",
       "R:HEMATIES:1",
       "R:HEMOGLOBINA:1",
@@ -94,6 +94,23 @@ describe("buildLabReportPdf", () => {
     ]);
     expect(vaginalRows.filter((row) => row.kind === "section").map((row) => row.label)).toEqual([
       "PRUEBAS QUÍMICAS", "EXAMEN MICROSCÓPICO",
+    ]);
+  });
+
+  it("organiza uroanálisis como examen completo con secciones clínicas", () => {
+    const rows = buildReportTableRows([
+      reportResult("URO-COLOR", "COLOR", "UROANÁLISIS"),
+      reportResult("URO-DEN", "DENSIDAD", "UROANÁLISIS"),
+      reportResult("URO-GLU", "GLUCOSA", "UROANÁLISIS"),
+      reportResult("URO-NIT", "NITRITOS", "UROANÁLISIS"),
+      reportResult("URO-CEL", "C.EPITELIALES", "UROANÁLISIS"),
+      reportResult("URO-CIL", "CILINDROS", "UROANÁLISIS"),
+    ]);
+    expect(rows.map((row) => row.kind === "result" ? `R:${row.result.analysis}:${row.indent}` : `${row.kind === "title" ? "T" : "S"}:${row.label}`)).toEqual([
+      "T:EXAMEN COMPLETO DE ORINA",
+      "S:EXAMEN FÍSICO", "R:COLOR:1", "R:DENSIDAD:1",
+      "S:EXAMEN QUÍMICO", "R:GLUCOSA:1", "R:NITRITOS:1",
+      "S:EXAMEN MICROSCÓPICO", "R:C.EPITELIALES:1", "R:CILINDROS:1",
     ]);
   });
 

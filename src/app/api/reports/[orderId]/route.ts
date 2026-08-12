@@ -21,11 +21,18 @@ function resultText(row: { numeric_value: number | null; qualitative_value: stri
 export async function POST(request: Request, context: { params: Promise<{ orderId: string }> }) {
   const { orderId } = await context.params;
   if (!UUID.test(orderId)) return NextResponse.json({ error: "Identificador inválido." }, { status: 400 });
-  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown } | null;
+  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown; resultIds?: unknown } | null;
   const targetGroup = typeof body?.group === "string" ? body.group.trim() : "";
   const targetBatch = typeof body?.batchId === "string" && UUID.test(body.batchId) ? body.batchId : "";
+  const resultIds = Array.isArray(body?.resultIds)
+    && body.resultIds.every((id) => typeof id === "string" && UUID.test(id))
+    ? [...new Set(body.resultIds as string[])]
+    : null;
   if (body?.batchId !== undefined && !targetBatch) {
     return NextResponse.json({ error: "Tanda de análisis inválida." }, { status: 400 });
+  }
+  if (!resultIds?.length) {
+    return NextResponse.json({ error: "Selecciona al menos un análisis para imprimir." }, { status: 400 });
   }
 
   const supabase = await createClient();
@@ -74,6 +81,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
   const groupById = new Map((groupsResult.data ?? []).map((group) => [group.id, group]));
   const analysisById = new Map((analysesResult.data ?? []).map((analysis) => [analysis.id, analysis]));
   const valueBySelection = new Map((values ?? []).map((value) => [value.order_analysis_id, value]));
+  const includedResultIds = new Set(resultIds);
   const printable: PrintableResult[] = selected.flatMap((item) => {
     const analysis = analysisById.get(item.analysis_id);
     const value = valueBySelection.get(item.id);
@@ -81,6 +89,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     const group = groupById.get(analysis.group_id)?.name ?? "Otros";
     if (targetBatch && item.batch_id !== targetBatch) return [];
     if (targetGroup && group !== targetGroup) return [];
+    if (!includedResultIds.has(item.id)) return [];
     const snapshot = (value.clinical_snapshot ?? {}) as Record<string, unknown>;
     return [{
       group,
@@ -101,13 +110,13 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
   });
 
   const selectedCount = targetBatch
-    ? selected.filter((item) => item.batch_id === targetBatch).length
+    ? selected.filter((item) => item.batch_id === targetBatch && includedResultIds.has(item.id)).length
     : targetGroup
     ? selected.filter((item) => {
         const analysis = analysisById.get(item.analysis_id);
-        return analysis && (groupById.get(analysis.group_id)?.name ?? "Otros") === targetGroup;
+        return analysis && includedResultIds.has(item.id) && (groupById.get(analysis.group_id)?.name ?? "Otros") === targetGroup;
       }).length
-    : selected.length;
+    : selected.filter((item) => includedResultIds.has(item.id)).length;
   if (selectedCount === 0) {
     return NextResponse.json({ error: "El grupo seleccionado no pertenece a esta orden." }, { status: 404 });
   }

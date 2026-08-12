@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateAgeAt, expandMillonesText, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isMissingBatchSchema, isValidDni, linkedHematologyValues, normalizeDocument } from "./clinical";
+import { biochemistryFormulaKey, calculateAgeAt, expandMillonesText, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isCalculatedHematologyResult, isMissingBatchSchema, isValidDni, linkedBiochemistryValues, linkedHematologyValues, normalizeDocument } from "./clinical";
 import type { ResultValue } from "./types";
 
 describe("calculateAgeAt", () => {
@@ -110,6 +110,38 @@ describe("linkedHematologyValues", () => {
     expect(linkedHematologyValues("HEM-RBC", "4.5")).toEqual({
       "HEM-RBC": "4.5", "HEM-HB": "13.5", "HEM-HCT": "40.5",
     });
+  });
+
+  it("identifica los resultados bloqueados por código o nombre", () => {
+    expect(isCalculatedHematologyResult("HEM-RBC", "")).toBe(true);
+    expect(isCalculatedHematologyResult("LOCAL", "Hemoglobina", "Hematología")).toBe(true);
+    expect(isCalculatedHematologyResult("HEM-HCT", "Hematocrito")).toBe(false);
+    expect(isCalculatedHematologyResult("LOCAL", "Hemoglobina glicosilada", "Bioquímica")).toBe(false);
+  });
+});
+
+describe("linkedBiochemistryValues", () => {
+  it("calcula HDL, VLDL y LDL a partir de colesterol y triglicéridos", () => {
+    const afterCholesterol = linkedBiochemistryValues("BIO-CHOL", "186", { "BIO-TG": "352" });
+    expect(afterCholesterol).toEqual({ "BIO-HDL": "31.62", "BIO-VLDL": "70.4", "BIO-LDL": "83.98" });
+    expect(linkedBiochemistryValues("BIO-TG", "352", {
+      "BIO-CHOL": "186", "BIO-HDL": "31.62",
+    })).toEqual({ "BIO-HDL": "31.62", "BIO-VLDL": "70.4", "BIO-LDL": "83.98" });
+  });
+
+  it("calcula bilirrubina indirecta", () => {
+    expect(linkedBiochemistryValues("BIO-BD", "0.32", { "BIO-BT": "1.25" }))
+      .toEqual({ "BIO-BI": "0.93" });
+  });
+
+  it("calcula globulinas", () => {
+    expect(linkedBiochemistryValues("BIO-ALB", "4.21", { "BIO-PROT": "7.18" }))
+      .toEqual({ "BIO-GLOB": "2.97" });
+  });
+
+  it("reconoce variantes por nombre del catálogo", () => {
+    expect(biochemistryFormulaKey("COD-LOCAL", "Bilirrubina indirecta", "Bioquímica")).toBe("BIO-BI");
+    expect(biochemistryFormulaKey("COD-LOCAL", "Proteínas totales", "Bioquímica")).toBe("BIO-PROT");
   });
 });
 

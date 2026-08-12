@@ -3,11 +3,12 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isMissingBatchSchema } from "@/lib/clinical";
 import { formatDni } from "@/lib/patients";
-import type { AnalysisDefinition, Analyst, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
+import type { AnalysisDefinition, Analyst, CatalogGroup, CatalogSubsection, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
 
 type PatientRow = { id: number; full_name: string; birth_date: string | null; sex: Patient["sex"] | null; sync_version?: number };
 type OrderRow = { id: string; order_number: number; patient_id: number; ordered_at: string; lock_version: number };
-type GroupRow = { id: string; name: string };
+type GroupRow = { id: string; name: string; display_order: number; active: boolean };
+type SubsectionRow = { id: string; group_id: string; name: string; display_order: number };
 type AnalysisRow = {
   id: string;
   code: string;
@@ -79,11 +80,11 @@ export async function loadLabData(
   }
   const [
     patientsResult, ordersResult, groupsResult, analysesResult, versionsResult,
-    orderAnalysesResult, analysisBatchesResult, revisionsResult, resultsResult, analystsResult, settingsResult,
+    orderAnalysesResult, analysisBatchesResult, revisionsResult, resultsResult, analystsResult, settingsResult, subsectionsResult,
   ] = await Promise.all([
     supabase.from("patients").select(patientColumns),
     ordersQuery,
-    supabase.from("analysis_groups").select("id,name"),
+    supabase.from("analysis_groups").select("id,name,display_order,active").order("display_order"),
     supabase.from("analyses").select("id,code,group_id,name,result_type,active,source_metadata"),
     supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,critical_limits,effective_from,effective_to,clinical_status").order("version", { ascending: false }),
     supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id,batch_id,performed_by,analyst_id,display_order,created_at").order("display_order"),
@@ -92,6 +93,7 @@ export async function loadLabData(
     supabase.from("result_values").select("id,revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot"),
     supabase.from("analysts").select("id,full_name,active").order("full_name"),
     supabase.from("lab_settings").select("trade_name,report_footer").eq("id", true).maybeSingle(),
+    supabase.from("analysis_subsections").select("id,group_id,name,display_order").order("display_order"),
   ]);
 
   // Never turn a failed clinical query into an empty collection. Doing so
@@ -123,6 +125,7 @@ export async function loadLabData(
   const resultRows = (resultsResult.data ?? []) as ResultRow[];
   const analystRows = (analystsResult.data ?? []) as AnalystRow[];
   const settings = settingsResult.data as SettingsRow | null;
+  const subsectionRows = subsectionsResult.error ? [] : (subsectionsResult.data ?? []) as SubsectionRow[];
 
   if (orderAnalysesResult.error) {
     const missingPerformer = orderAnalysesResult.error.code === "42703"
@@ -258,7 +261,7 @@ export async function loadLabData(
     const metadata = row.source_metadata ?? {};
     const limits = numericLimits(version?.reference_ranges, version?.critical_limits);
     return {
-      id: row.id, versionId: version?.id ?? "", code: row.code, name: row.name, group: groupsById.get(row.group_id) ?? "Sin grupo",
+      id: row.id, groupId: row.group_id, versionId: version?.id ?? "", code: row.code, name: row.name, group: groupsById.get(row.group_id) ?? "Sin grupo",
       resultType: row.result_type, unit: version?.unit ?? "", method: version?.method ?? "",
       reference: referenceLabel(version?.reference_ranges), active: row.active,
       sampleType: version?.sample_type,
@@ -279,6 +282,19 @@ export async function loadLabData(
     active: row.active,
   }));
 
+  const catalogSubsections: CatalogSubsection[] = subsectionRows.length
+    ? subsectionRows.map((row) => ({ id: row.id, groupId: row.group_id, group: groupsById.get(row.group_id) ?? "Sin grupo", name: row.name, displayOrder: row.display_order }))
+    : [...new Map(analyses.filter((analysis) => analysis.subsection && analysis.groupId).map((analysis) => [
+        `${analysis.groupId}:${analysis.subsection!.toLocaleLowerCase("es")}`,
+        { id: `legacy:${analysis.groupId}:${analysis.subsection}`, groupId: analysis.groupId!, group: analysis.group, name: analysis.subsection!, displayOrder: analysis.pickerOrder ?? 999 },
+      ])).values()];
+  const catalogGroups: CatalogGroup[] = groupRows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    displayOrder: row.display_order,
+    active: row.active,
+  }));
+
   const summary = {
     orders: orders.length,
     analyses: orderAnalysisRows.length,
@@ -290,6 +306,8 @@ export async function loadLabData(
     patients,
     orders,
     analyses,
+    catalogGroups,
+    catalogSubsections,
     analysts,
     trend: [],
     summary,
