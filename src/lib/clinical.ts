@@ -22,6 +22,16 @@ export function groupResultsByBatch(results: ResultValue[], fallbackDate: string
   })).sort((a, b) => b.registeredAt.localeCompare(a.registeredAt));
 }
 
+/**
+ * Fecha y hora de nacimiento en un solo valor. La hora se guarda aparte porque
+ * casi ningún paciente la tiene; aquí se juntan para que el cálculo de edad
+ * pueda bajar hasta las horas cuando existe.
+ */
+export function birthMoment(birthDate: string, birthTime?: string) {
+  if (!birthDate) return "";
+  return birthTime ? `${birthDate.slice(0, 10)}T${birthTime}` : birthDate;
+}
+
 export function calculateAgeAt(birthDate: string, atDate: string) {
   const birth = new Date(birthDate.includes("T") ? birthDate : `${birthDate}T00:00:00`);
   const at = new Date(atDate.includes("T") ? atDate : `${atDate}T00:00:00`);
@@ -48,11 +58,14 @@ export function formatPatientAgeAt(birthAt: string, occurredAt: string) {
   const hour = 60 * 60 * 1000;
   const day = 24 * hour;
   const days = Math.floor(elapsed / day);
-  if (days < 28) {
-    if (!hasBirthTime) return `${days} ${days === 1 ? "día" : "días"}`;
-    const hours = Math.floor((elapsed % day) / hour);
-    return `${days} ${days === 1 ? "día" : "días"} ${hours} ${hours === 1 ? "hora" : "horas"}`;
+
+  // La escala baja de unidad conforme el paciente es más pequeño: a un bebé de
+  // esta mañana no le sirve «0 días», y a un adulto no le sirve saber las horas.
+  if (days < 1 && hasBirthTime) {
+    const hours = Math.floor(elapsed / hour);
+    return `${hours} ${hours === 1 ? "hora" : "horas"}`;
   }
+  if (days < 28) return `${days} ${days === 1 ? "día" : "días"}`;
 
   const { years, months } = calculateAgeAt(birthAt, occurredAt);
   if (years < 1) {
@@ -62,7 +75,9 @@ export function formatPatientAgeAt(birthAt: string, occurredAt: string) {
     return `${completedMonths} ${completedMonths === 1 ? "mes" : "meses"}`;
   }
 
-  return `${years} ${years === 1 ? "año" : "años"} ${months} ${months === 1 ? "mes" : "meses"}`;
+  const yearsLabel = `${years} ${years === 1 ? "año" : "años"}`;
+  if (months === 0) return yearsLabel;
+  return `${yearsLabel} y ${months} ${months === 1 ? "mes" : "meses"}`;
 }
 
 export function flagNumericResult(

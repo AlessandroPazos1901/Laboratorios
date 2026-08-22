@@ -10,14 +10,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { buildPickerGroups } from "@/lib/catalog-presets";
 import { analysisBelongsToCatalogGroup, buildCatalogGroupOptions, catalogSubsectionDeleteRequest, catalogSubsectionRenameRequest } from "@/lib/catalog-groups";
-import { biochemistryFormulaKey, flagNumericResult, formatNumericResult, formatPatientAgeAt, groupResultsByBatch, isCalculatedAnalysisResult, linkedBiochemistryValues, linkedHematologyValues, resultFlagFor, type BiochemistryFormulaKey } from "@/lib/clinical";
+import { biochemistryFormulaKey, birthMoment, flagNumericResult, formatNumericResult, formatPatientAgeAt, groupResultsByBatch, isCalculatedAnalysisResult, linkedBiochemistryValues, linkedHematologyValues, resultFlagFor, type BiochemistryFormulaKey } from "@/lib/clinical";
 import {
   buildResultPresentationRows, displayResultNumber, entryFullFigure, formatDisplayReference, formatDisplayUnit,
   formatResultReference, formatResultUnit, resultEntryValue, resultStorageValue,
 } from "@/lib/result-presentation";
 import {
   ageColumns, AGE_BRACKETS, analysisKey, buildCountMatrix, countSheet, dayColumns, detailSheet,
-  groupColor, matchesAgeRange, patientYears, tintedColor, transposedCountSheet,
+  groupColor, matchesAgeRange, patientAgeLabel, patientYears, tintedColor, transposedCountSheet,
   type AgeBasis, type SheetData,
 } from "@/lib/analytics-report";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
@@ -57,7 +57,7 @@ function preparePdfWindow() {
   if (!preview) return null;
   preview.document.title = "Preparando informe";
   preview.document.body.textContent = "Generando el informe PDF…";
-  preview.document.body.style.cssText = "margin:0;min-height:100vh;display:grid;place-items:center;font:700 22px Arial,sans-serif;color:#153f46;background:#f4fafb";
+  preview.document.body.style.cssText = "margin:0;min-height:100vh;display:grid;place-items:center;font:700 22px Arial,sans-serif;color:#1f4e7a;background:#f4f8fc";
   return preview;
 }
 
@@ -197,6 +197,13 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
   );
 }
 
+/** Hoy en la zona del laboratorio, para decidir si un paciente es recién nacido. */
+function todayInLima() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Lima", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+}
+
 function PageHead({ eyebrow, title, text, action, compact = false }: { eyebrow: string; title: string; text: string; action?: React.ReactNode; compact?: boolean }) {
   return <div className={compact ? "page-head compact" : "page-head"}><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{text}</p></div>{action}</div>;
 }
@@ -275,6 +282,10 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   const [dni, setDni] = useState("");
   const [name, setName] = useState("");
   const [birthDate, setBirthDate] = useState("");
+  // Solo para recién nacidos: con la hora, la edad se informa en horas en vez de
+  // «0 días», que en un neonato no dice nada.
+  const [newbornTime, setNewbornTime] = useState("");
+  const newbornToday = birthDate !== "" && birthDate === todayInLima();
   const [sex, setSex] = useState<"F" | "M" | "X" | "">("");
   const [occurredAt, setOccurredAt] = useState(initialOccurredAt);
   const activeAnalysts = analysts.filter((analyst) => analyst.active);
@@ -407,6 +418,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           documentNumber: dni,
           fullName: (existing?.fullName ?? name).trim(),
           birthDate,
+          birthTime: newbornToday && newbornTime ? newbornTime : undefined,
           sex: sex as "F" | "M" | "X",
         });
         setPatientId(saved.id);
@@ -416,6 +428,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           patient_name: (existing?.fullName ?? name).trim(),
           patient_birth_date: birthDate,
           patient_sex: sex,
+          patient_birth_time: newbornToday && newbornTime ? newbornTime : null,
         });
         if (patientResult.error) throw patientResult.error;
         const savedPatientId = (patientResult.data as { id: number } | null)?.id;
@@ -502,6 +515,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
             <label>Nombre completo<input value={existing?.fullName ?? name} disabled={Boolean(existing)} onChange={(event) => setName(event.target.value.replace(/[0-9]/g, ""))} placeholder="Nombres y apellidos" /></label>
             <label>Sexo<select value={sex} onChange={(event) => setSex(event.target.value as typeof sex)}><option value="">Seleccionar</option><option value="F">Femenino</option><option value="M">Masculino</option><option value="X">Otro</option></select></label>
             <label>Fecha de nacimiento<input type="date" max={occurredAt.slice(0, 10)} value={birthDate} onChange={(event) => setBirthDate(event.target.value)} /></label>
+            {newbornToday && <label>Hora de nacimiento<input type="time" value={newbornTime} onChange={(event) => setNewbornTime(event.target.value)} /><small className="field-hint">Recién nacido: con la hora, el informe da la edad en horas.</small></label>}
             <label>Fecha del análisis<div className="input-with-icon"><CalendarDays /><input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></div></label>
             <label className="analyst-field"><span><UserRound />Realizado por</span><select value={analystId} onChange={(event) => setAnalystId(event.target.value)} required><option value="">Seleccionar analista…</option>{activeAnalysts.map((analyst) => <option value={analyst.id} key={analyst.id}>{analyst.fullName}</option>)}</select>{activeAnalysts.length === 0 && <small>No hay analistas activos. Agrégalos en Configuración.</small>}</label>
           </div>
@@ -652,7 +666,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
   const activeBatchAnalysts = useMemo(() => [...new Set(activeBatch?.results.map((result) => result.performedBy).filter(Boolean) ?? [])], [activeBatch]);
   // En pantalla la edad es la de hoy; el PDF conserva la que tenía al tomar la muestra.
   const currentAge = order.patientBirthDate
-    ? formatPatientAgeAt(order.patientBirthDate, new Date().toISOString())
+    ? formatPatientAgeAt(birthMoment(order.patientBirthDate, order.patientBirthTime), new Date().toISOString())
     : "Edad no registrada";
   const critical = activeBatch?.results.some((result) => resultFlagFor(result) === "critical") ?? false;
   const allActiveResultsSelected = Boolean(activeBatch?.results.length) && activeBatch.results.every((result) => printResultIds.has(result.orderAnalysisId));
@@ -1113,6 +1127,8 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
   const offlineRepository = useOfflineRepository();
   const [name, setName] = useState(patient.fullName);
   const [birthDate, setBirthDate] = useState(patient.birthDate);
+  const [newbornTime, setNewbornTime] = useState(patient.birthTime ?? "");
+  const newbornToday = birthDate !== "" && birthDate === todayInLima();
   const [sex, setSex] = useState<"F" | "M" | "X" | "">(patient.sex === "U" ? "" : patient.sex);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1132,6 +1148,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
           patient,
           fullName: name.trim(),
           birthDate,
+          birthTime: newbornToday && newbornTime ? newbornTime : undefined,
           sex,
         });
       } else {
@@ -1140,6 +1157,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
           patient_name: name.trim(),
           patient_birth_date: birthDate,
           patient_sex: sex,
+          patient_birth_time: newbornToday && newbornTime ? newbornTime : null,
         });
         if (response.error) throw response.error;
       }
@@ -1160,6 +1178,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
         <label>Nombre completo<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label>
         <div className="dialog-fields">
           <label>Sexo<select value={sex} onChange={(event) => setSex(event.target.value as typeof sex)}><option value="">Seleccionar</option><option value="F">Femenino</option><option value="M">Masculino</option><option value="X">Otro</option></select></label>
+          {newbornToday && <label>Hora de nacimiento<input type="time" value={newbornTime} onChange={(event) => setNewbornTime(event.target.value)} /><small className="field-hint">Recién nacido: con la hora, el informe da la edad en horas.</small></label>}
           <label>Fecha de nacimiento<input type="date" max={new Date().toISOString().slice(0, 10)} value={birthDate} onChange={(event) => setBirthDate(event.target.value)} /></label>
         </div>
         {error && <p className="form-error" role="alert">{error}</p>}
@@ -1220,7 +1239,7 @@ function PatientsView({ patients, orders, openOrder, notify }: { patients: LabDa
             return <tr key={patient.id} onClick={() => setSelectedId(patient.id)} tabIndex={0}>
               <td className="mono strong">{patient.documentNumber}</td>
               <td><strong>{patient.fullName}</strong></td>
-              <td>{formatPatientAgeAt(patient.birthDate, now)}</td>
+              <td>{formatPatientAgeAt(birthMoment(patient.birthDate, patient.birthTime), now)}</td>
               <td>{sexLabel[patient.sex]}</td>
               <td>{last ? <><strong>{fmtDate(last.createdAt)}</strong><small className="block mono">{last.code}</small></> : <span className="muted-text">Sin órdenes</span>}</td>
               <td><ChevronRight /></td>
@@ -1247,7 +1266,7 @@ function PatientsView({ patients, orders, openOrder, notify }: { patients: LabDa
     .map((series) => ({ ...series, points: [...series.points].reverse() }))
     .sort((left, right) => left.label.localeCompare(right.label, "es"));
   const activeSeries = numericSeries.find((series) => series.key === selectedSeriesKey) ?? numericSeries[0] ?? null;
-  const age = formatPatientAgeAt(selected.birthDate, new Date().toISOString());
+  const age = formatPatientAgeAt(birthMoment(selected.birthDate, selected.birthTime), new Date().toISOString());
   const lastOrder = lastOrderOf.get(selected.id);
   return <>
     <PageHead eyebrow="Registro maestro" title="Pacientes" text="Identidad única e historial de análisis." action={patientActions} />
@@ -1590,7 +1609,7 @@ function AnalyticsView({ orders, analyses, openOrder }: { orders: LabOrder[]; an
                 ? displayResultNumber(numeric, result.unit)
                 : result.value;
             },
-            (order) => patientYears(order, ANALYTICS_AGE_BASIS) ?? "Sin registrar",
+            (order) => patientAgeLabel(order, ANALYTICS_AGE_BASIS),
             fmtDate,
             meta("Detalle de resultados por orden", ageRangeLabel(draft)),
           ),
@@ -2255,12 +2274,18 @@ function SettingsView({ analysts }: { analysts: LabData["analysts"] }) {
     event.preventDefault();
     setPasswordMessage(null);
     if (offlineRepository && !offlineRepository.online) return setPasswordMessage({ type: "error", text: "Cambiar la contraseña requiere conexión." });
-    if (password.length < 12) return setPasswordMessage({ type: "error", text: "La contraseña debe tener al menos 12 caracteres." });
     if (password !== passwordConfirmation) return setPasswordMessage({ type: "error", text: "Las contraseñas no coinciden." });
     setChangingPassword(true);
     try {
       const response = await createClient().auth.updateUser({ password });
-      if (response.error) return setPasswordMessage({ type: "error", text: "No se pudo cambiar la contraseña. Vuelve a iniciar sesión e inténtalo nuevamente." });
+      if (response.error) {
+        // La app ya no impone longitud, pero Supabase mantiene la suya en la
+        // configuración del proyecto. Si es eso, decirlo evita buscar el fallo aquí.
+        const rejected = /password|contrase/i.test(response.error.message);
+        return setPasswordMessage({ type: "error", text: rejected
+          ? `Supabase rechazó la contraseña: ${response.error.message}`
+          : "No se pudo cambiar la contraseña. Vuelve a iniciar sesión e inténtalo nuevamente." });
+      }
       // La copia local se abre con la contraseña de la cuenta. Sin re-cifrarla
       // aquí, este equipo ya no podría abrir sus datos sin internet.
       await offlineRepository?.rewrapVault(password);
@@ -2279,7 +2304,7 @@ function SettingsView({ analysts }: { analysts: LabData["analysts"] }) {
     <div className="settings-grid">
       <article className="panel settings-form-card analyst-settings-card"><div className="settings-card-head"><span><UserRound /></span><div><h2>Analistas</h2><p>No crean cuentas. Se seleccionan al registrar cada análisis.</p></div></div><form onSubmit={addAnalyst}><label>Nombre completo<input value={analystName} onChange={(event) => setAnalystName(event.target.value.replace(/[0-9]/g, ""))} maxLength={120} placeholder="Nombre del analista" required /></label>{analystMessage && <p className={`settings-message ${analystMessage.type}`} role="status">{analystMessage.type === "success" ? <Check /> : <CircleAlert />}{analystMessage.text}</p>}<button className="button primary" disabled={savingAnalyst}><Plus />{savingAnalyst ? "Guardando…" : "Agregar analista"}</button></form><div className="analyst-list">{localAnalysts.map((analyst) => <div key={analyst.id}><span><strong>{analyst.fullName}</strong><small>{analyst.active ? "Disponible para nuevos análisis" : "Inactivo"}</small></span><button type="button" className={analyst.active ? "button secondary" : "button primary"} disabled={savingAnalyst} onClick={() => void toggleAnalyst(analyst.id, !analyst.active)}>{analyst.active ? "Desactivar" : "Reactivar"}</button></div>)}{localAnalysts.length === 0 && <p className="form-help">Agrega al menos un analista antes de registrar resultados.</p>}</div></article>
       <article className="panel settings-form-card"><div className="settings-card-head"><span><Users /></span><div><h2>Cuenta compartida</h2><p>Todo el personal accede con la misma cuenta.</p></div></div><div className="shared-account-note"><ShieldCheck /><p>La autoría clínica se registra mediante el analista seleccionado. No se enviarán invitaciones a otros usuarios.</p></div></article>
-      <article className="panel settings-form-card"><div className="settings-card-head"><span><KeyRound /></span><div><h2>Cambiar contraseña</h2><p>Actualiza rápidamente la contraseña de tu sesión actual.</p></div></div><form onSubmit={changePassword}><label>Nueva contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={12} required /></label><label>Repite la contraseña<input type="password" value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} autoComplete="new-password" minLength={12} required /></label>{passwordMessage && <p className={`settings-message ${passwordMessage.type}`} role="status">{passwordMessage.type === "success" ? <Check /> : <CircleAlert />}{passwordMessage.text}</p>}<button className="button primary" disabled={changingPassword}><KeyRound />{changingPassword ? "Actualizando…" : "Cambiar contraseña"}</button></form></article>
+      <article className="panel settings-form-card"><div className="settings-card-head"><span><KeyRound /></span><div><h2>Cambiar contraseña</h2><p>Actualiza rápidamente la contraseña de tu sesión actual.</p></div></div><form onSubmit={changePassword}><label>Nueva contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required /></label><label>Repite la contraseña<input type="password" value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} autoComplete="new-password" required /></label>{passwordMessage && <p className={`settings-message ${passwordMessage.type}`} role="status">{passwordMessage.type === "success" ? <Check /> : <CircleAlert />}{passwordMessage.text}</p>}<button className="button primary" disabled={changingPassword}><KeyRound />{changingPassword ? "Actualizando…" : "Cambiar contraseña"}</button></form></article>
     </div>
   </>;
 }

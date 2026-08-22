@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { formatPatientAgeAt } from "@/lib/clinical";
+import { birthMoment, formatPatientAgeAt } from "@/lib/clinical";
 import { buildLabReportPdf, type LabReportResult } from "@/lib/report-pdf";
 import { formatDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/server";
@@ -55,7 +55,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     groupsResult,
     analysesResult,
   ] = await Promise.all([
-    supabase.from("patients").select("id,full_name,birth_date,sex").eq("id", order.patient_id).single(),
+    supabase.from("patients").select("id,full_name,birth_date,birth_time,sex").eq("id", order.patient_id).single(),
     supabase.from("result_revisions").select("id,revision").eq("order_id", order.id).order("revision", { ascending: false }).limit(1).single(),
     supabase.from("order_analyses").select("id,analysis_id,analysis_version_id,batch_id,analyst_id,display_order").eq("order_id", order.id).order("display_order"),
     supabase.from("analysis_groups").select("id,name,display_order"),
@@ -126,19 +126,23 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     return NextResponse.json({ error: "Completa todos los resultados del grupo antes de imprimir." }, { status: 409 });
   }
 
-  const logoBytes = await readFile(path.join(process.cwd(), "public", "logo_laboratorio.png"));
+  const logoPath = (name: string) => path.join(process.cwd(), "public", name);
+  const [leftLogo, rightLogo] = await Promise.all([
+    readFile(logoPath("membrete-izquierda.png")),
+    readFile(logoPath("membrete-derecha.png")),
+  ]);
   const bytes = await buildLabReportPdf({
     orderNumber: order.order_number,
     orderedAt: order.ordered_at,
     patientName: patientResult.data.full_name,
     documentNumber: formatDni(patientResult.data.id),
     sex: ({ F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as Record<string, string>)[patientResult.data.sex ?? "U"] ?? "No registrado",
-    age: formatPatientAgeAt(patientResult.data.birth_date ?? "", order.ordered_at),
+    age: formatPatientAgeAt(birthMoment(patientResult.data.birth_date ?? "", patientResult.data.birth_time ?? undefined), order.ordered_at),
     revision: revision.revision,
     printedAt: new Date().toISOString(),
     title,
     results: printable,
-  }, logoBytes);
+  }, { left: leftLogo, right: rightLogo });
   return new NextResponse(Buffer.from(bytes), {
     headers: {
       "Content-Type": "application/pdf",

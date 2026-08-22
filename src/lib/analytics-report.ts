@@ -1,5 +1,5 @@
 import { buildPickerGroups } from "@/lib/catalog-presets";
-import { calculateAgeAt } from "@/lib/clinical";
+import { birthMoment, calculateAgeAt, formatPatientAgeAt } from "@/lib/clinical";
 import type { AnalysisDefinition, LabOrder, ResultValue } from "@/lib/types";
 
 // La edad al analizar responde "cuántos análisis se hicieron a mayores de 60";
@@ -24,6 +24,17 @@ export function patientYears(order: LabOrder, basis: AgeBasis, now = new Date())
   const reference = basis === "current" ? now.toISOString() : order.createdAt;
   const { years } = calculateAgeAt(order.patientBirthDate, reference);
   return Number.isFinite(years) ? years : null;
+}
+
+/**
+ * Edad legible para la hoja de detalle. Un entero de años convierte a todo
+ * recién nacido en «0»; esto reparte la escala: días hasta el mes, meses hasta
+ * el año, y años con meses a partir de ahí.
+ */
+export function patientAgeLabel(order: LabOrder, basis: AgeBasis, now = new Date()) {
+  if (!order.patientBirthDate) return "Sin registrar";
+  const reference = basis === "current" ? now.toISOString() : order.createdAt;
+  return formatPatientAgeAt(birthMoment(order.patientBirthDate, order.patientBirthTime), reference);
 }
 
 // Sin fecha de nacimiento no se entra en ningún tramo acotado: antes dejar fuera

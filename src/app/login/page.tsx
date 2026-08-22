@@ -2,10 +2,14 @@
 
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { createClient, isSupabaseConfigured, resolveLoginEmail } from "@/lib/supabase/client";
+import { handOffCredentials } from "@/lib/offline/handoff";
+import { OFFLINE_MODE_ENABLED } from "@/lib/offline/types";
 
 export default function LoginPage() {
+  const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
@@ -24,8 +28,19 @@ export default function LoginPage() {
     const { error: authError } = email
       ? await createClient().auth.signInWithPassword({ email, password })
       : { error: new Error("unknown_user") };
+    if (authError) {
+      setLoading(false);
+      return setError("Usuario o contraseña incorrectos.");
+    }
+    // Con réplica local, /app necesita esta misma contraseña para abrir la copia
+    // cifrada. Se le pasa por memoria y se navega sin recargar, que es lo que
+    // conserva ese dato; recargando se perdería y volvería a pedir el ingreso.
+    if (OFFLINE_MODE_ENABLED) {
+      handOffCredentials(username, password);
+      router.push("/app");
+      return;
+    }
     setLoading(false);
-    if (authError) return setError("Usuario o contrasena incorrectos.");
     window.location.replace("/app");
   }
 

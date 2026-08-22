@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { biochemistryFormulaKey, calculateAgeAt, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isCalculatedAnalysisResult, isCalculatedHematologyResult, isMissingBatchSchema, isValidDni, linkedBiochemistryValues, linkedHematologyValues, normalizeDocument, numericLimits, parseReferenceLimits, resultFlagFor, resultNumericLimits } from "./clinical";
+import { biochemistryFormulaKey, birthMoment, calculateAgeAt, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isCalculatedAnalysisResult, isCalculatedHematologyResult, isMissingBatchSchema, isValidDni, linkedBiochemistryValues, linkedHematologyValues, normalizeDocument, numericLimits, parseReferenceLimits, resultFlagFor, resultNumericLimits } from "./clinical";
 import type { ResultValue } from "./types";
 
 describe("calculateAgeAt", () => {
@@ -13,19 +13,49 @@ describe("calculateAgeAt", () => {
 
 describe("formatPatientAgeAt", () => {
   it("muestra años y meses desde el primer año", () => {
-    expect(formatPatientAgeAt("2024-01-15T10:00:00-05:00", "2026-08-01T09:00:00-05:00")).toBe("2 años 6 meses");
+    expect(formatPatientAgeAt("2024-01-15T10:00:00-05:00", "2026-08-01T09:00:00-05:00")).toBe("2 años y 6 meses");
   });
 
   it("muestra meses en menores de un año", () => {
     expect(formatPatientAgeAt("2026-01-15T10:00:00-05:00", "2026-08-01T09:00:00-05:00")).toBe("6 meses");
   });
 
-  it("muestra días y horas durante los primeros 28 días", () => {
-    expect(formatPatientAgeAt("2026-07-30T03:00:00-05:00", "2026-08-01T09:00:00-05:00")).toBe("2 días 6 horas");
+  it("cuenta en días hasta el mes, sin arrastrar las horas", () => {
+    expect(formatPatientAgeAt("2026-07-30T03:00:00-05:00", "2026-08-01T09:00:00-05:00")).toBe("2 días");
+  });
+
+  it("el primer día se informa en horas", () => {
+    expect(formatPatientAgeAt("2026-08-01T03:00:00-05:00", "2026-08-01T07:00:00-05:00")).toBe("4 horas");
+    expect(formatPatientAgeAt("2026-08-01T03:00:00-05:00", "2026-08-01T04:00:00-05:00")).toBe("1 hora");
+  });
+
+  it("omite los meses cuando el cumpleaños acaba de pasar", () => {
+    expect(formatPatientAgeAt("2000-08-01", "2026-08-01T09:00:00-05:00")).toBe("26 años");
   });
 
   it("no inventa horas cuando solo se registró la fecha de nacimiento", () => {
     expect(formatPatientAgeAt("2026-07-30", "2026-08-01T09:00:00-05:00")).toBe("2 días");
+  });
+});
+
+describe("birthMoment", () => {
+  it("junta fecha y hora cuando el recién nacido la tiene", () => {
+    expect(birthMoment("2026-08-22", "06:30")).toBe("2026-08-22T06:30");
+  });
+
+  it("sin hora devuelve la fecha tal cual, que es el caso de casi todos", () => {
+    expect(birthMoment("2026-08-22")).toBe("2026-08-22");
+    expect(birthMoment("2026-08-22", "")).toBe("2026-08-22");
+  });
+
+  it("sin fecha no compone nada", () => {
+    expect(birthMoment("", "06:30")).toBe("");
+  });
+
+  it("compuesto, la edad de un bebé de horas deja de ser «0 días»", () => {
+    const momento = birthMoment("2026-08-22", "06:30");
+    expect(formatPatientAgeAt(momento, "2026-08-22T14:30:00")).toBe("8 horas");
+    expect(formatPatientAgeAt("2026-08-22", "2026-08-22T14:30:00")).toBe("0 días");
   });
 });
 

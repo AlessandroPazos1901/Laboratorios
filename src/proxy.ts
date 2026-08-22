@@ -33,13 +33,11 @@ export async function proxy(request: NextRequest) {
     if (request.nextUrl.pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Sesion requerida." }, { status: 401 });
     }
-    // Con réplica local, /app trae su propio formulario de ingreso: es el mismo
-    // que se usa sin internet, y así el personal ve una sola pantalla en lugar
-    // de iniciar sesión aquí y volver a identificarse al abrir los datos.
-    // Los datos siguen protegidos: /api responde 401 sin sesión.
-    if (process.env.NEXT_PUBLIC_OFFLINE_MODE !== "true") {
-      return NextResponse.redirect(new URL("/login", request.url));
-    }
+    // Este proxy solo llega a ejecutarse si el equipo alcanzó al servidor, o sea
+    // con internet. Sin internet la navegación la resuelve el service worker
+    // contra /offline y nunca pasa por aquí. Por eso mandar al ingreso principal
+    // es siempre correcto: es la pantalla de ingreso cuando hay conexión.
+    return NextResponse.redirect(new URL("/login", request.url));
   }
 
   return response;

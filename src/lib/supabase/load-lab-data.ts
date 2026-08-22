@@ -5,7 +5,7 @@ import { flagNumericResult, isMissingBatchSchema, numericLimits, referenceLabel,
 import { formatDni } from "@/lib/patients";
 import type { AnalysisDefinition, Analyst, CatalogGroup, CatalogSubsection, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
 
-type PatientRow = { id: number; full_name: string; birth_date: string | null; sex: Patient["sex"] | null; sync_version?: number };
+type PatientRow = { id: number; full_name: string; birth_date: string | null; birth_time?: string | null; sex: Patient["sex"] | null; sync_version?: number };
 type OrderRow = { id: string; order_number: number; patient_id: number; ordered_at: string; lock_version: number };
 type GroupRow = { id: string; name: string; display_order: number; active: boolean };
 type SubsectionRow = { id: string; group_id: string; name: string; display_order: number };
@@ -46,7 +46,7 @@ export async function loadLabData(
   supabase: SupabaseClient,
   options: { offlineWindowDays?: number } = {},
 ): Promise<LabData> {
-  const patientColumns = "id,full_name,birth_date,sex,sync_version";
+  const patientColumns = "id,full_name,birth_date,birth_time,sex,sync_version";
   let ordersQuery = supabase
     .from("orders")
     .select("id,order_number,patient_id,ordered_at,lock_version")
@@ -159,6 +159,7 @@ export async function loadLabData(
     documentNumber: formatDni(row.id),
     fullName: row.full_name,
     birthDate: row.birth_date ?? "",
+    birthTime: row.birth_time ?? undefined,
     sex: row.sex ?? "U",
     syncVersion: row.sync_version ?? 1,
   }));
@@ -229,6 +230,7 @@ export async function loadLabData(
       patientName: patient?.full_name ?? "Paciente no disponible",
       documentNumber: patient ? formatDni(patient.id) : "",
       patientBirthDate: patient?.birth_date ?? "",
+      patientBirthTime: patient?.birth_time ?? undefined,
       patientSex: patient?.sex ?? "U",
       createdAt: row.ordered_at,
       groups,

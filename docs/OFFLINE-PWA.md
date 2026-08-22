@@ -73,16 +73,26 @@ No se debe reutilizar el par de claves entre staging y producción. Rotarlo
 invalida las autorizaciones offline existentes; primero deben sincronizarse las
 colas y volver a enrolar los equipos.
 
-## Ingreso: una sola pantalla
+## Ingreso: nunca dos veces
 
 El personal entra con **usuario y contraseña**, los mismos con o sin internet.
-No hay PIN.
+No hay PIN. Y se teclea **una sola vez por sesión**, haya o no conexión.
 
-| Situación | Qué ocurre |
-|---|---|
-| Con internet, equipo nuevo | Valida contra Supabase, descarga los datos y deja la copia local cifrada con esa contraseña. |
-| Con internet, equipo ya usado | Valida contra Supabase y abre la copia local en silencio. |
-| Sin internet | Abre la copia local: que la contraseña la descifre prueba que ya fue válida contra el servidor. |
+| Situación | Dónde se ingresa | Qué ocurre |
+|---|---|---|
+| Con internet, equipo nuevo | Pantalla principal | Valida contra Supabase, descarga los datos y deja la copia local cifrada con esa contraseña. |
+| Con internet, equipo ya usado | Pantalla principal | Valida contra Supabase y abre la copia local en silencio, sin preguntar de nuevo. |
+| Sin internet | Pantalla de la propia app | Abre la copia local: que la contraseña la descifre prueba que ya fue válida contra el servidor. |
+
+Con internet la copia local necesita la contraseña para abrirse, y en `/app` ya
+no está. Por eso `/login` la pasa por memoria (`src/lib/offline/handoff.ts`) y
+navega **sin recargar**: recargando se perdería el dato y volvería a pedirse el
+ingreso, que es exactamente el doble login que hay que evitar. El traspaso es de
+un solo uso y no toca disco.
+
+Si se llega a `/app` con internet y sin ese traspaso —una recarga, o entrando
+directo a la dirección— se vuelve a la pantalla principal en lugar de abrir un
+segundo formulario. Ese rebote está limitado a una vez.
 
 El usuario se configura en `lab_settings.login_username` y la base lo traduce al
 correo de la cuenta compartida. Al cambiar la contraseña desde Configuración, la

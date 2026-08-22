@@ -82,7 +82,7 @@ function queuedEntries(operation: OfflineOperation): QueuedEntry[] {
 
 function rebasePatient(data: LabData, operation: OfflineOperation): LabData {
   const payload = operation.payload as {
-    patientId?: unknown; fullName?: unknown; birthDate?: unknown; sex?: unknown;
+    patientId?: unknown; fullName?: unknown; birthDate?: unknown; birthTime?: unknown; sex?: unknown;
   };
   const id = Number(payload.patientId);
   if (!Number.isFinite(id)) return data;
@@ -92,6 +92,7 @@ function rebasePatient(data: LabData, operation: OfflineOperation): LabData {
     documentNumber: existing?.documentNumber ?? formatDni(id),
     fullName: String(payload.fullName ?? existing?.fullName ?? ""),
     birthDate: (payload.birthDate as string | null) ?? existing?.birthDate ?? "",
+    birthTime: (payload.birthTime as string | null) ?? existing?.birthTime,
     sex: (payload.sex as Patient["sex"] | null) ?? existing?.sex ?? "U",
     syncVersion: existing?.syncVersion ?? 1,
     syncState: "pending",

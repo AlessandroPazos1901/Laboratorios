@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AGE_BRACKETS, ageColumns, analysisKey, bracketFor, buildCountMatrix, dayColumns,
-  countSheet, DEFAULT_GROUP_COLOR, detailSheet, groupColor, matchesAgeRange, patientYears,
+  countSheet, DEFAULT_GROUP_COLOR, detailSheet, groupColor, matchesAgeRange, patientAgeLabel, patientYears,
   tintedColor, transposedCountSheet, UNCATALOGUED_GROUP,
 } from "./analytics-report";
 import type { AnalysisDefinition, LabOrder, ResultValue } from "./types";
@@ -28,6 +28,36 @@ const catalog = [
   analysis("HEM-HCT", "Hematocrito", "Hematología", 20),
   analysis("BIO-GLU", "Glucosa", "Bioquímica", 10),
 ];
+
+describe("patientAgeLabel", () => {
+  const nacido = (birthDate: string) => order("1", "2026-08-10T10:00:00-05:00", birthDate, []);
+
+  it("un recién nacido se cuenta en días, no en un cero", () => {
+    expect(patientAgeLabel(nacido("2026-08-08"), "at-analysis")).toBe("2 días");
+    expect(patientAgeLabel(nacido("2026-08-09"), "at-analysis")).toBe("1 día");
+    expect(patientAgeLabel(nacido("2026-08-10"), "at-analysis")).toBe("0 días");
+  });
+
+  it("pasa a meses al cumplir cuatro semanas", () => {
+    expect(patientAgeLabel(nacido("2026-07-14"), "at-analysis")).toBe("27 días");
+    expect(patientAgeLabel(nacido("2026-07-13"), "at-analysis")).toBe("1 mes");
+  });
+
+  it("del mes al año cuenta meses, y después años con meses", () => {
+    expect(patientAgeLabel(nacido("2025-10-10"), "at-analysis")).toBe("10 meses");
+    expect(patientAgeLabel(nacido("2025-08-10"), "at-analysis")).toBe("1 año");
+    expect(patientAgeLabel(nacido("1966-06-10"), "at-analysis")).toBe("60 años y 2 meses");
+  });
+
+  it("sin fecha de nacimiento no inventa una edad", () => {
+    expect(patientAgeLabel(nacido(""), "at-analysis")).toBe("Sin registrar");
+  });
+
+  it("la base «actual» mide contra hoy, no contra la fecha de la orden", () => {
+    const hoy = new Date("2027-08-10T10:00:00-05:00");
+    expect(patientAgeLabel(nacido("2025-08-10"), "current", hoy)).toBe("2 años");
+  });
+});
 
 describe("patientYears", () => {
   const ordered = order("1", "2026-08-10T10:00:00-05:00", "1966-08-10", []);
@@ -229,11 +259,11 @@ describe("hojas del libro", () => {
     const columnas = matriz.rows.filter((row) => row.total > 0)
       .map(({ key, group, analysis }) => ({ key, group, analysis }));
     const hoja = detailSheet(columnas, ordenes, (item) => item.results,
-      (r) => Number(r.value), () => 60, (value) => value.slice(0, 10), meta);
+      (r) => Number(r.value), () => "60 años y 2 meses", (value) => value.slice(0, 10), meta);
     expect(hoja.aoa[6]).toEqual(["Orden", "Fecha", "Paciente", "DNI", "Edad", "Hemoglobina", "Glucosa"]);
-    expect(hoja.aoa[7]).toEqual(["ORD-1", "2026-08-10", "Paciente 1", "70000000", 60, 1, 1]);
+    expect(hoja.aoa[7]).toEqual(["ORD-1", "2026-08-10", "Paciente 1", "70000000", "60 años y 2 meses", 1, 1]);
     // La orden 2 no tiene glucosa: celda vacía, no cero.
-    expect(hoja.aoa[8]).toEqual(["ORD-2", "2026-08-11", "Paciente 2", "70000000", 60, 1, ""]);
+    expect(hoja.aoa[8]).toEqual(["ORD-2", "2026-08-11", "Paciente 2", "70000000", "60 años y 2 meses", 1, ""]);
   });
 });
 

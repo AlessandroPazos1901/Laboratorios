@@ -104,6 +104,18 @@ Ejecutar en orden:
     cambiar el usuario: `update public.lab_settings set login_username = '…';`.
     Aplicada el 2026-08-21.
 
+16. `202608220001_patient_birth_time.sql`: edad en horas para recién nacidos.
+    Agrega `patients.birth_time` (opcional) en vez de convertir `birth_date` a
+    timestamp, para no cambiar la forma de ninguna lectura existente.
+    `upsert_patient_with_demographics` y `update_patient_details` reciben un
+    quinto argumento `patient_birth_time time default null`; ambas se sueltan y
+    se recrean porque cambia la firma, y se les devuelven los permisos —soltar
+    una función también borra sus grants, y al recrearla hereda EXECUTE para
+    `public`/`anon`, que hay que retirar—. Una hora ya registrada no se borra al
+    guardar sin ella, y una hora futura se rechaza con `invalid_birth_date`.
+    `apply_offline_operation` transporta `birthTime` en el payload y lo compara
+    al detectar conflictos de demografía. Aplicada el 2026-08-22.
+
 Las RPC del flujo principal incluyen `search_patients`,
 `upsert_simple_patient`, `upsert_patient_with_demographics`,
 `update_patient_details`, `register_daily_analyses`,

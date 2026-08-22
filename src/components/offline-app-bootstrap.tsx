@@ -24,6 +24,7 @@ import {
   type UnlockedVault,
 } from "@/lib/offline/db";
 import { probeServerConnectivity } from "@/lib/offline/connectivity";
+import { takeHandedCredentials } from "@/lib/offline/handoff";
 import { resultConflictAlreadyApplied, resultConflictDetails } from "@/lib/offline/materialize";
 import { rebaseSnapshot } from "@/lib/offline/rebase";
 import { orderOperationsByDependencies } from "@/lib/offline/sync";
@@ -46,6 +47,18 @@ async function jsonResponse<T>(response: Response) {
   return body as T;
 }
 
+/**
+ * Marca de un solo rebote a /login. `sessionStorage` puede lanzar (ventana
+ * privada, almacenamiento bloqueado); si falla, se comporta como si no hubiera
+ * rebote y el peor caso es pedir la contraseña aquí.
+ */
+const BOUNCE_KEY = "lims-jose:login-bounce";
+const bounceMark = {
+  taken: () => { try { return sessionStorage.getItem(BOUNCE_KEY) === "1"; } catch { return false; } },
+  set: () => { try { sessionStorage.setItem(BOUNCE_KEY, "1"); } catch { /* sin marca, un rebote más */ } },
+  clear: () => { try { sessionStorage.removeItem(BOUNCE_KEY); } catch { /* nada que limpiar */ } },
+};
+
 function unavailablePatientName(value: string) {
   return !value.trim() || /no disponible|no encontrado|sin nombre/i.test(value);
 }
@@ -65,6 +78,7 @@ function normalizeOfflineData(data: LabData, rejectIncomplete = false): LabData 
       documentNumber,
       fullName: order.patientName,
       birthDate: order.patientBirthDate,
+      birthTime: order.patientBirthTime,
       sex: order.patientSex,
       syncVersion: 1,
     } satisfies LabData["patients"][number];
@@ -82,6 +96,7 @@ function normalizeOfflineData(data: LabData, rejectIncomplete = false): LabData 
       patientName: patient.fullName,
       documentNumber: patient.documentNumber,
       patientBirthDate: patient.birthDate,
+      patientBirthTime: patient.birthTime,
       patientSex: patient.sex,
     } : order;
   });
@@ -272,15 +287,40 @@ export function OfflineAppBootstrap() {
         const localMeta = await getActiveVaultMeta();
         if (!mounted) return;
         setMeta(localMeta ?? null);
-        setOnline(await probeServerConnectivity());
+        const reachable = await probeServerConnectivity();
         if (!mounted) return;
-        // Haya o no bóveda, haya o no internet, la puerta es la misma: el
-        // formulario de ingreso. Él decide si valida contra Supabase o contra la
-        // copia local.
+        setOnline(reachable);
+
+        // Con internet solo se ingresa por la pantalla principal. Si viene de
+        // ahí, trae la contraseña y la copia local se abre sola: el usuario no
+        // ve un segundo formulario.
+        const handed = takeHandedCredentials();
+        if (handed) {
+          await signInRef.current(handed.username, handed.password);
+          return;
+        }
+        // Con internet pero sin credenciales (recarga, o se entró directo a
+        // /app): se devuelve a la pantalla principal en vez de abrir aquí un
+        // segundo formulario que haría teclear la contraseña dos veces. El
+        // rebote se marca una vez: si al volver siguiera sin credenciales, ir y
+        // venir sin fin sería peor que pedirlas aquí.
+        if (reachable && !bounceMark.taken()) {
+          bounceMark.set();
+          window.location.replace("/login");
+          return;
+        }
+        bounceMark.clear();
+        // Sin internet esta es la única puerta.
         setStatus("needs-access");
       } catch (error) {
         if (!mounted) return;
         const reason = error instanceof Error ? error.message : "";
+        // La bóveda vieja no abre con la contraseña nueva: eso tiene su propia
+        // pantalla con el botón para rehacer la copia, no es un error de arranque.
+        if (reason === "stale_vault") {
+          setStatus("needs-access");
+          return;
+        }
         setMessage(reason === "offline_database_blocked"
           ? "Los datos están abiertos en otra ventana. Cierra todas las pestañas y ventanas de LIMS José, luego abre solo una."
           : reason || "No se pudo iniciar la aplicación.");
@@ -363,6 +403,7 @@ export function OfflineAppBootstrap() {
     setData(unlocked.snapshot.data);
     setCurrentUser(unlocked.snapshot.currentUser);
     setStatus("unlocked");
+    bounceMark.clear();
     await refreshCounters(unlocked);
   }
 
@@ -371,6 +412,11 @@ export function OfflineAppBootstrap() {
    * la contraseña. Sin internet vale que la contraseña abra la bóveda local: solo
    * pudo cifrarse así tras un ingreso conectado válido.
    */
+  // El arranque necesita llamar a `signIn` sin volver a dispararse en cada
+  // render, y `signIn` depende de casi todo el componente.
+  const signInRef = useRef<(username: string, password: string) => Promise<void>>(null!);
+  signInRef.current = signIn;
+
   async function signIn(username: string, password: string) {
     const reachable = await probeServerConnectivity();
     setOnline(reachable);
@@ -416,6 +462,8 @@ export function OfflineAppBootstrap() {
     setData(normalized.snapshot.data);
     setCurrentUser(unlocked.snapshot.currentUser);
     setStatus("unlocked");
+    // Se entró bien: el próximo arranque puede volver a rebotar si hace falta.
+    bounceMark.clear();
     // Si la pestaña se cerró a mitad de un envío, esas operaciones quedaron en
     // "syncing" y ningún envío posterior las recoge. Al abrir se devuelven a la
     // cola; reenviarlas es inofensivo porque el recibo del servidor las deduplica.
@@ -580,10 +628,13 @@ function AccessGate(props: {
     <span>{props.online ? <ShieldCheck /> : <LockKeyhole />}</span>
     <p className="eyebrow">{props.online ? "Con conexión" : "Sin conexión"}</p>
     <h1>Iniciar sesión</h1>
+    {/* Con internet se entra por la pantalla principal, así que esta casi
+        siempre se ve sin conexión. El caso conectado queda por si vuelve el
+        internet con el formulario ya abierto. */}
     <p>{props.online
-      ? "Ingresa con tu usuario y contraseña. Este equipo quedará listo para seguir trabajando si se corta el internet."
+      ? "Ya hay conexión. Ingresa con tu usuario y contraseña de siempre."
       : props.meta
-        ? `Sin internet. Usa la misma contraseña de siempre; puedes trabajar hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`
+        ? `Sin internet. Usa tu usuario y la misma contraseña de siempre; puedes trabajar hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`
         : "Sin internet y este equipo todavía no tiene datos guardados. Conéctalo una vez para prepararlo."}</p>
     {props.message && <p className="compat-note">{props.message}</p>}
     <form onSubmit={submit}>

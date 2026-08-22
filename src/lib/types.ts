@@ -5,6 +5,8 @@ export type Patient = {
   documentNumber: string;
   fullName: string;
   birthDate: string;
+  /** Solo en recién nacidos, "HH:MM". Permite informar la edad en horas. */
+  birthTime?: string;
   sex: "F" | "M" | "X" | "U";
   syncVersion?: number;
   syncState?: "synced" | "pending" | "conflict";
@@ -86,6 +88,7 @@ export type LabOrder = {
   patientName: string;
   documentNumber: string;
   patientBirthDate: string;
+  patientBirthTime?: string;
   patientSex: Patient["sex"];
   createdAt: string;
   groups: string[];

@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { buildLabReportPdf } from "@/lib/report-pdf";
-import { formatPatientAgeAt } from "@/lib/clinical";
+import { birthMoment, formatPatientAgeAt } from "@/lib/clinical";
 import { patientIdFromDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -26,6 +26,7 @@ import {
   type LocalRegistrationEntry,
 } from "@/lib/offline/materialize";
 import { materializeCatalog } from "@/lib/offline/materialize-catalog";
+import { offlineReportResults } from "@/lib/offline/report-input";
 import { catalogFriendlyError, type CatalogOperation } from "@/lib/catalog-operations";
 import type { OfflineOperation, OfflineVaultSnapshot } from "@/lib/offline/types";
 import type {
@@ -45,12 +46,14 @@ export type OfflineRepository = {
     documentNumber: string;
     fullName: string;
     birthDate?: string;
+    birthTime?: string;
     sex?: Patient["sex"];
   }): Promise<Patient>;
   updatePatient(input: {
     patient: Patient;
     fullName: string;
     birthDate: string;
+    birthTime?: string;
     sex: Patient["sex"];
   }): Promise<Patient>;
   registerAnalyses(input: {
@@ -154,6 +157,7 @@ export function OfflineRepositoryProvider(props: {
               patient_name: input.fullName,
               patient_birth_date: input.birthDate,
               patient_sex: input.sex,
+              patient_birth_time: input.birthTime ?? null,
             })
           : await createClient().rpc("upsert_simple_patient", {
               patient_dni: input.documentNumber,
@@ -161,12 +165,13 @@ export function OfflineRepositoryProvider(props: {
             });
         if (response.error) throw response.error;
         await props.refresh();
-        const row = response.data as { id: number; full_name?: string; birth_date?: string; sex?: Patient["sex"]; sync_version?: number };
+        const row = response.data as { id: number; full_name?: string; birth_date?: string; birth_time?: string | null; sex?: Patient["sex"]; sync_version?: number };
         return {
           id: row.id,
           documentNumber: input.documentNumber,
           fullName: row.full_name ?? input.fullName,
           birthDate: row.birth_date ?? input.birthDate ?? "",
+          birthTime: row.birth_time ?? input.birthTime,
           sex: row.sex ?? input.sex ?? "U",
           syncVersion: row.sync_version ?? 1,
         };
@@ -180,6 +185,7 @@ export function OfflineRepositoryProvider(props: {
         documentNumber: input.documentNumber,
         fullName: input.fullName,
         birthDate: input.birthDate ?? existing?.birthDate ?? "",
+        birthTime: input.birthTime ?? existing?.birthTime,
         sex: input.sex ?? existing?.sex ?? "U",
         syncVersion: existing?.syncVersion ?? 1,
         syncState: "pending",
@@ -189,6 +195,7 @@ export function OfflineRepositoryProvider(props: {
         patientId: patient.id,
         fullName: patient.fullName,
         birthDate: patient.birthDate || null,
+        birthTime: patient.birthTime || null,
         sex: patient.sex === "U" ? null : patient.sex,
       };
       await commit(materializePatient(props.data, patient), operation, true);
@@ -201,10 +208,11 @@ export function OfflineRepositoryProvider(props: {
           patient_name: input.fullName,
           patient_birth_date: input.birthDate,
           patient_sex: input.sex,
+          patient_birth_time: input.birthTime ?? null,
         });
         if (response.error) throw response.error;
         await props.refresh();
-        return { ...input.patient, fullName: input.fullName, birthDate: input.birthDate, sex: input.sex };
+        return { ...input.patient, fullName: input.fullName, birthDate: input.birthDate, birthTime: input.birthTime ?? input.patient.birthTime, sex: input.sex };
       }
       const operation = operationBase(requireSession(), props.currentUser, "patient.update");
       operation.baseVersion = input.patient.syncVersion ?? 1;
@@ -212,12 +220,14 @@ export function OfflineRepositoryProvider(props: {
         patientId: input.patient.id,
         fullName: input.fullName,
         birthDate: input.birthDate,
+        birthTime: input.birthTime ?? null,
         sex: input.sex,
       };
       const patient: Patient = {
         ...input.patient,
         fullName: input.fullName,
         birthDate: input.birthDate,
+        birthTime: input.birthTime ?? input.patient.birthTime,
         sex: input.sex,
         syncState: "pending",
         clientMutationId: operation.clientMutationId,
@@ -378,8 +388,11 @@ export function OfflineRepositoryProvider(props: {
       const included = new Set(includedResultIds);
       const results = order.results.filter((result) => result.batchId === batchId && included.has(result.orderAnalysisId));
       if (!results.length || results.some((result) => !result.value.trim())) throw new Error("all_batch_results_required");
-      const analysisByVersion = new Map(props.data.analyses.map((analysis) => [analysis.versionId, analysis]));
-      const logo = new Uint8Array(await (await fetch("/logo_laboratorio.png")).arrayBuffer());
+      const logoBytes = async (name: string) => new Uint8Array(await (await fetch(name)).arrayBuffer());
+      const [leftLogo, rightLogo] = await Promise.all([
+        logoBytes("/membrete-izquierda.png"),
+        logoBytes("/membrete-derecha.png"),
+      ]);
       const bytes = await buildLabReportPdf({
         orderNumber: Number(order.code.match(/(\d+)$/)?.[1] ?? 0),
         orderCode: order.code,
@@ -387,21 +400,12 @@ export function OfflineRepositoryProvider(props: {
         patientName: order.patientName,
         documentNumber: order.documentNumber,
         sex: ({ F: "Femenino", M: "Masculino", X: "Otro", U: "No registrado" } as const)[order.patientSex],
-        age: formatPatientAgeAt(order.patientBirthDate, order.createdAt),
+        age: formatPatientAgeAt(birthMoment(order.patientBirthDate, order.patientBirthTime), order.createdAt),
         revision: order.revisionNumber ?? 1,
         printedAt: new Date().toISOString(),
         title,
-        results: results.map((result) => ({
-          group: result.group,
-          analysisCode: result.analysisCode,
-          analysis: result.analyte,
-          subsection: result.analysisVersionId ? analysisByVersion.get(result.analysisVersionId)?.subsection : undefined,
-          value: result.value,
-          unit: result.unit,
-          reference: result.reference,
-          flag: result.flag,
-        })),
-      }, logo);
+        results: offlineReportResults(results, props.data.analyses, props.data.catalogGroups ?? []),
+      }, { left: leftLogo, right: rightLogo });
       return new Blob([bytes as BlobPart], { type: "application/pdf" });
     },
     async previewPatientRoster(file) {

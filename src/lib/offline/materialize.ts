@@ -91,6 +91,7 @@ export function materializePatient(data: LabData, patient: Patient) {
     patientName: patient.fullName,
     documentNumber: patient.documentNumber,
     patientBirthDate: patient.birthDate,
+    patientBirthTime: patient.birthTime,
     patientSex: patient.sex,
   } : order);
   return withSummary({ ...data, patients, orders });
@@ -169,6 +170,7 @@ export function materializeRegistration(input: {
     patientName: input.patient.fullName,
     documentNumber: input.patient.documentNumber,
     patientBirthDate: input.patient.birthDate,
+    patientBirthTime: input.patient.birthTime,
     patientSex: input.patient.sex,
     createdAt: input.occurredAt,
     groups: [...batchByGroup.keys()],

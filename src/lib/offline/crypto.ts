@@ -3,9 +3,10 @@ const decoder = new TextDecoder();
 const searchKeys = new WeakMap<CryptoKey, Promise<CryptoKey>>();
 
 // La bóveda local se abre con la misma contraseña que la cuenta: un solo
-// credencial en lugar de contraseña online + PIN offline. El largo mínimo solo
-// evita derivar de una cadena vacía; la validación real la hace Supabase.
-export const VAULT_SECRET_MIN_LENGTH = 4;
+// credencial en lugar de contraseña online + PIN offline. No se impone largo
+// alguno más allá de que no sea vacía: quien decide qué contraseña es válida es
+// Supabase, y este mínimo solo debe impedir derivar una clave de la nada.
+export const VAULT_SECRET_MIN_LENGTH = 1;
 export const PBKDF2_ITERATIONS = 600_000;
 
 export type EncryptedValue = { ciphertext: string; iv: string };

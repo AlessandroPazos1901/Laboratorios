@@ -1,5 +1,5 @@
 import {
-  appendBezierCurve, closePath, lineTo, moveTo, PDFDocument, PDFFont, PDFImage, PDFPage,
+  appendBezierCurve, closePath, lineTo, moveTo, PDFDocument, PDFFont, PDFPage,
   popGraphicsState, pushGraphicsState, setLineWidth, setStrokingColor, StandardFonts, stroke, rgb,
 } from "pdf-lib";
 import { canonicalAnalysisOrder, canonicalGroupOrder } from "@/lib/catalog-order";
@@ -27,6 +27,7 @@ const HEADER_HEIGHT = TITLE_HEIGHT + COLUMN_HEIGHT;
 const CARD_HEIGHT = 52;
 const CARD_GAP = 10;
 const LOGO_MAX_HEIGHT = 64;
+const LOGO_GAP = 24;
 const PAGE_BOTTOM = 40;
 const GROUP_GAP = 8;
 
@@ -253,40 +254,79 @@ function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height
   return bottom;
 }
 
-function groupResults(results: LabReportResult[]) {
-  const grouped = new Map<string, LabReportResult[]>();
-  [...results].sort((left, right) =>
+/**
+ * Orden de impresión. Manda lo que diga el catálogo (`groupOrder` /
+ * `analysisOrder`); la tabla canónica solo cubre a quien no lo traiga, y para un
+ * grupo que no conoce devuelve 999, con lo que el desempate acaba siendo
+ * alfabético. Por eso quien construye las filas debe traer siempre el orden.
+ */
+export function sortReportResults(results: LabReportResult[]) {
+  return [...results].sort((left, right) =>
     (left.groupOrder ?? canonicalGroupOrder(left.group)) - (right.groupOrder ?? canonicalGroupOrder(right.group))
     || (left.analysisOrder ?? canonicalAnalysisOrder(left.group, left.analysis))
       - (right.analysisOrder ?? canonicalAnalysisOrder(right.group, right.analysis))
-    || left.analysis.localeCompare(right.analysis, "es"))
+    || left.analysis.localeCompare(right.analysis, "es"));
+}
+
+function groupResults(results: LabReportResult[]) {
+  const grouped = new Map<string, LabReportResult[]>();
+  sortReportResults(results)
     .forEach((result) => grouped.set(result.group, [...(grouped.get(result.group) ?? []), result]));
   return grouped;
 }
 
-export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Array) {
+/** Las dos piezas del membrete, nombradas por dónde caen en la hoja. */
+export type LabReportLogos = { left: Uint8Array; right: Uint8Array };
+
+/**
+ * Membrete a dos piezas: el símbolo pegado al margen izquierdo y el nombre del
+ * laboratorio al derecho. Comparten altura para que se lean como una sola
+ * cabecera, y esa altura se encoge si con las proporciones dadas no cupieran
+ * a lo ancho de la hoja.
+ */
+export function headerLogoBoxes(
+  left: { width: number; height: number },
+  right: { width: number; height: number },
+) {
+  const leftRatio = left.width / left.height;
+  const rightRatio = right.width / right.height;
+  const height = Math.min(LOGO_MAX_HEIGHT, (CONTENT_WIDTH - LOGO_GAP) / (leftRatio + rightRatio));
+  const rightWidth = height * rightRatio;
+  return {
+    height,
+    left: { x: MARGIN, width: height * leftRatio },
+    right: { x: MARGIN + CONTENT_WIDTH - rightWidth, width: rightWidth },
+  };
+}
+
+export async function buildLabReportPdf(data: LabReportData, logos: LabReportLogos) {
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const logo = logoBytes[0] === 0x89 && logoBytes[1] === 0x50
-    ? await pdf.embedPng(logoBytes)
-    : await pdf.embedJpg(logoBytes);
-  const logoHeight = Math.min(LOGO_MAX_HEIGHT, CONTENT_WIDTH / (logo.width / logo.height));
+  // Los archivos del laboratorio llevan extensión .png pero son JPEG, así que
+  // el formato se decide por los bytes mágicos y no por el nombre.
+  const embedLogo = (bytes: Uint8Array) => bytes[0] === 0x89 && bytes[1] === 0x50
+    ? pdf.embedPng(bytes)
+    : pdf.embedJpg(bytes);
+  const leftLogo = await embedLogo(logos.left);
+  const rightLogo = await embedLogo(logos.right);
+  const logoBoxes = headerLogoBoxes(leftLogo, rightLogo);
+  const logoHeight = logoBoxes.height;
   const freshTableTop = 792 - MARGIN - logoHeight - 6 - CARD_HEIGHT - CARD_GAP;
   const freshBodySpace = freshTableTop - HEADER_HEIGHT - PAGE_BOTTOM;
   let page: PDFPage | undefined;
   let y = 0;
 
-  function drawLogo(target: PDFPage, image: PDFImage) {
-    const height = logoHeight;
-    const width = height * (image.width / image.height);
-    target.drawImage(image, { x: MARGIN + (CONTENT_WIDTH - width) / 2, y: 792 - MARGIN - height, width, height });
-    return 792 - MARGIN - height - 6;
+  function drawLogos(target: PDFPage) {
+    const top = 792 - MARGIN - logoHeight;
+    target.drawImage(leftLogo, { ...logoBoxes.left, y: top, height: logoHeight });
+    target.drawImage(rightLogo, { ...logoBoxes.right, y: top, height: logoHeight });
+    return top - 6;
   }
 
   function addPage(group: string, continuation = false) {
     page = pdf.addPage(LETTER);
-    const cardTop = drawLogo(page, logo);
+    const cardTop = drawLogos(page);
     drawPatientCard(page, data, regular, bold, cardTop);
     y = drawTableHeader(page, bold, group, cardTop - CARD_HEIGHT - CARD_GAP, continuation);
   }

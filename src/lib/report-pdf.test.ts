@@ -3,7 +3,8 @@ import path from "node:path";
 import { PDFDocument } from "pdf-lib";
 import { describe, expect, it } from "vitest";
 import {
-  buildLabReportPdf, buildReportTableRows, formatReportReference, formatReportUnit, type LabReportResult,
+  buildLabReportPdf, buildReportTableRows, formatReportReference, formatReportUnit, headerLogoBoxes,
+  type LabReportResult,
 } from "./report-pdf";
 import { formatNumericResult } from "./clinical";
 import { entryFullFigure, resultEntryValue, resultStorageValue } from "./result-presentation";
@@ -28,6 +29,33 @@ const reportResult = (analysisCode: string, analysis: string, group = "HEMATOLOG
 
 const orderedGroup = (groupOrder: number, results: LabReportResult[]) => results
   .map((result, index) => ({ ...result, groupOrder, analysisOrder: (index + 1) * 10 }));
+
+describe("membrete a dos piezas", () => {
+  // Proporciones reales de los archivos del laboratorio.
+  const izquierda = { width: 1205, height: 375 };
+  const derecha = { width: 296, height: 351 };
+
+  it("pega cada pieza a su margen y les da la misma altura", () => {
+    const cajas = headerLogoBoxes(izquierda, derecha);
+    expect(cajas.height).toBe(64);
+    expect(cajas.left.x).toBe(42);
+    // La derecha termina justo en el margen opuesto de una hoja Carta.
+    expect(cajas.right.x + cajas.right.width).toBeCloseTo(570, 5);
+  });
+
+  it("no deja que las dos piezas se toquen", () => {
+    const cajas = headerLogoBoxes(izquierda, derecha);
+    expect(cajas.right.x).toBeGreaterThan(cajas.left.x + cajas.left.width);
+  });
+
+  it("encoge la altura si con imágenes anchas no cupieran de lado a lado", () => {
+    const panoramica = { width: 2000, height: 200 };
+    const cajas = headerLogoBoxes(panoramica, panoramica);
+    expect(cajas.height).toBeLessThan(64);
+    expect(cajas.left.width + cajas.right.width).toBeLessThanOrEqual(528);
+    expect(cajas.right.x).toBeGreaterThan(cajas.left.x + cajas.left.width);
+  });
+});
 
 describe("buildLabReportPdf", () => {
   it("respeta el título de una subsección creada en el catálogo", () => {
@@ -205,7 +233,10 @@ describe("buildLabReportPdf", () => {
   });
 
   it("genera una muestra visual con todos los grupos jerarquizados", async () => {
-    const logo = await readFile(path.join(process.cwd(), "public", "logo_laboratorio.png"));
+    const logo = {
+      left: await readFile(path.join(process.cwd(), "public", "membrete-izquierda.png")),
+      right: await readFile(path.join(process.cwd(), "public", "membrete-derecha.png")),
+    };
     const hematology = [
       reportResult("HEM-RBC", "HEMATIES"), reportResult("HEM-HB", "HEMOGLOBINA"),
       reportResult("HEM-HCT", "HEMATOCRITO"), reportResult("HEM-WBC", "LEUCOCITOS"),
@@ -271,7 +302,10 @@ describe("buildLabReportPdf", () => {
   });
 
   it("genera un informe válido y pagina análisis extensos", async () => {
-    const logo = await readFile(path.join(process.cwd(), "public", "logo_laboratorio.png"));
+    const logo = {
+      left: await readFile(path.join(process.cwd(), "public", "membrete-izquierda.png")),
+      right: await readFile(path.join(process.cwd(), "public", "membrete-derecha.png")),
+    };
     const bytes = await buildLabReportPdf({
       orderNumber: 1225937,
       orderedAt: "2026-08-01T10:30:00-05:00",
@@ -293,7 +327,7 @@ describe("buildLabReportPdf", () => {
 
     const pdf = await PDFDocument.load(bytes);
     expect(pdf.getPageCount()).toBeGreaterThan(1);
-    expect(bytes.byteLength).toBeGreaterThan(logo.byteLength);
+    expect(bytes.byteLength).toBeGreaterThan(logo.left.byteLength + logo.right.byteLength);
     if (process.env.WRITE_REPORT_SAMPLE === "1") {
       const output = path.join(process.cwd(), "tmp", "pdfs");
       await mkdir(output, { recursive: true });
@@ -302,7 +336,10 @@ describe("buildLabReportPdf", () => {
   });
 
   it("mantiene un hemograma completo en una sola hoja", async () => {
-    const logo = await readFile(path.join(process.cwd(), "public", "logo_laboratorio.png"));
+    const logo = {
+      left: await readFile(path.join(process.cwd(), "public", "membrete-izquierda.png")),
+      right: await readFile(path.join(process.cwd(), "public", "membrete-derecha.png")),
+    };
     const bytes = await buildLabReportPdf({
       orderNumber: 4665,
       orderedAt: "2026-08-11T16:20:00-05:00",
@@ -326,7 +363,10 @@ describe("buildLabReportPdf", () => {
   });
 
   it("aprovecha una misma página para grupos pequeños", async () => {
-    const logo = await readFile(path.join(process.cwd(), "public", "logo_laboratorio.png"));
+    const logo = {
+      left: await readFile(path.join(process.cwd(), "public", "membrete-izquierda.png")),
+      right: await readFile(path.join(process.cwd(), "public", "membrete-derecha.png")),
+    };
     const bytes = await buildLabReportPdf({
       orderNumber: 4664,
       orderedAt: "2026-08-11T16:20:00-05:00",
