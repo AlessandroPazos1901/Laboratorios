@@ -25,3 +25,19 @@ export async function probeServerConnectivity(input: {
     clearTimeout(timeout);
   }
 }
+
+/**
+ * Corta una espera que no debería eternizarse.
+ *
+ * La sonda de arriba solo prueba que responde *nuestro* servidor. Si el router
+ * sigue en pie pero no hay internet —o en desarrollo, donde el servidor es la
+ * propia máquina—, la sonda dice «hay conexión» y las llamadas a Supabase se
+ * quedan colgadas sin límite, porque su cliente no trae tiempo de espera. Eso
+ * dejaba el botón de ingreso en «Iniciando sesión…» para siempre.
+ */
+export function withTimeout<T>(work: Promise<T>, timeoutMs = 12_000) {
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("network_timeout")), timeoutMs)),
+  ]);
+}

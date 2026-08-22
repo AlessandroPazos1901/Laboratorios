@@ -11,8 +11,13 @@ import { normalizeLabel, resultSubsection, type ResultPresentationItem } from "@
  */
 export type ReportView = {
   id: string;
-  /** Encabeza el informe impreso, sobre los títulos de subgrupo. */
+  /** Nombre en el botón, y por defecto también el título impreso. */
   label: string;
+  /**
+   * No imprimir el título. Se usa cuando el nombre de la vista coincide con el
+   * de un subgrupo que ya se imprime: repetirlo dos veces seguidas no aporta.
+   */
+  omitPrintedTitle?: boolean;
   /** Subgrupos que entran. Excluyente con `except`. */
   subsections?: string[];
   /** Entra todo el grupo salvo estos subgrupos. */
@@ -25,6 +30,8 @@ const VIEWS: Record<string, ReportView[]> = {
     {
       id: "parasito-seriado",
       label: "PARÁSITO SERIADO",
+      // El subgrupo homónimo ya encabeza el bloque.
+      omitPrintedTitle: true,
       subsections: ["PARASITO SERIADO", "EXAMEN FISICO", "EXAMEN PARASITOLOGICO"],
     },
     {
@@ -44,6 +51,11 @@ const VIEWS: Record<string, ReportView[]> = {
     },
   ],
 };
+
+/** Título que llevará el informe, o nada si la vista no debe titularse. */
+export function printedTitleFor(view: ReportView | null) {
+  return view && !view.omitPrintedTitle ? view.label : undefined;
+}
 
 export function reportViewsForGroup(group: string): ReportView[] {
   return VIEWS[normalizeLabel(group)] ?? [];

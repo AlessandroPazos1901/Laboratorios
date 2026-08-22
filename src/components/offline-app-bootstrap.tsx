@@ -19,13 +19,16 @@ import {
   requestPersistentOfflineStorage,
   saveOfflineSnapshot,
   setOfflineOperationStatus,
+  resumeOfflineVault,
   unlockOfflineVault,
   type OfflineVaultMeta,
   type UnlockedVault,
 } from "@/lib/offline/db";
-import { probeServerConnectivity } from "@/lib/offline/connectivity";
+import { probeServerConnectivity, withTimeout } from "@/lib/offline/connectivity";
+import { forgetVaultKey, recallVaultKey, rememberVaultKey } from "@/lib/offline/session-key";
 import { takeHandedCredentials } from "@/lib/offline/handoff";
 import { resultConflictAlreadyApplied, resultConflictDetails } from "@/lib/offline/materialize";
+import { exportDataKey, importDataKey } from "@/lib/offline/crypto";
 import { rebaseSnapshot } from "@/lib/offline/rebase";
 import { orderOperationsByDependencies } from "@/lib/offline/sync";
 import { OfflineRepositoryProvider } from "@/lib/offline/repository";
@@ -291,6 +294,22 @@ export function OfflineAppBootstrap() {
         if (!mounted) return;
         setOnline(reachable);
 
+        // Recarga de la misma pestaña: la clave sigue guardada, así que se
+        // retoma sin pedir nada. Antes esto expulsaba al ingreso principal y
+        // parecía que la sesión se hubiera cerrado sola.
+        const stashed = recallVaultKey();
+        if (localMeta && stashed) {
+          try {
+            await adoptVaultRef.current(await resumeOfflineVault(await importDataKey(stashed)));
+            return;
+          } catch {
+            // Autorización vencida, bóveda cambiada o clave inservible: se sigue
+            // por el camino normal y se pedirá la contraseña.
+            forgetVaultKey();
+            if (!mounted) return;
+          }
+        }
+
         // Con internet solo se ingresa por la pantalla principal. Si viene de
         // ahí, trae la contraseña y la copia local se abre sola: el usuario no
         // ve un segundo formulario.
@@ -404,6 +423,7 @@ export function OfflineAppBootstrap() {
     setCurrentUser(unlocked.snapshot.currentUser);
     setStatus("unlocked");
     bounceMark.clear();
+    rememberVaultKey(await exportDataKey(unlocked.key));
     await refreshCounters(unlocked);
   }
 
@@ -416,11 +436,31 @@ export function OfflineAppBootstrap() {
   // render, y `signIn` depende de casi todo el componente.
   const signInRef = useRef<(username: string, password: string) => Promise<void>>(null!);
   signInRef.current = signIn;
+  const adoptVaultRef = useRef<(vault: UnlockedVault) => Promise<void>>(null!);
+  adoptVaultRef.current = adoptVault;
 
   async function signIn(username: string, password: string) {
     const reachable = await probeServerConnectivity();
     setOnline(reachable);
     if (reachable) {
+      try {
+        return await withTimeout(signInOnline(username, password));
+      } catch (reason) {
+        // Solo el silencio de la red hace caer al camino local. Una contraseña
+        // mal escrita se responde tal cual: entrar con la copia local en ese
+        // caso sería aceptar credenciales que el servidor ya rechazó.
+        if (!(reason instanceof Error) || reason.message !== "network_timeout") throw reason;
+        setOnline(false);
+        setMessage("El servidor no responde. Se abrió la copia guardada en este equipo.");
+      }
+    }
+    if (!meta) throw new Error("offline_not_prepared");
+    if (new Date(meta.lease.expiresAt).getTime() <= Date.now()) throw new Error("offline_lease_expired");
+    return unlock(password);
+  }
+
+  async function signInOnline(username: string, password: string) {
+    {
       const email = await resolveLoginEmail(username);
       const failed = !email || (await createClient().auth.signInWithPassword({ email, password })).error;
       if (failed) throw new Error("bad_credentials");
@@ -446,13 +486,13 @@ export function OfflineAppBootstrap() {
         throw new Error("stale_vault");
       }
     }
-    if (!meta) throw new Error("offline_not_prepared");
-    if (new Date(meta.lease.expiresAt).getTime() <= Date.now()) throw new Error("offline_lease_expired");
-    return unlock(password);
   }
 
   async function unlock(password: string) {
-    const unlocked = await unlockOfflineVault(password);
+    return adoptVault(await unlockOfflineVault(password));
+  }
+
+  async function adoptVault(unlocked: UnlockedVault) {
     const normalized = {
       ...unlocked,
       snapshot: { ...unlocked.snapshot, data: normalizeOfflineData(unlocked.snapshot.data) },
@@ -464,6 +504,7 @@ export function OfflineAppBootstrap() {
     setStatus("unlocked");
     // Se entró bien: el próximo arranque puede volver a rebotar si hace falta.
     bounceMark.clear();
+    rememberVaultKey(await exportDataKey(normalized.key));
     // Si la pestaña se cerró a mitad de un envío, esas operaciones quedaron en
     // "syncing" y ningún envío posterior las recoge. Al abrir se devuelven a la
     // cola; reenviarlas es inofensivo porque el recibo del servidor las deduplica.
@@ -482,6 +523,7 @@ export function OfflineAppBootstrap() {
   async function rebuildDevice(password: string) {
     if (meta) await fetch(`/api/offline/devices/${meta.deviceId}`, { method: "DELETE" }).catch(() => undefined);
     await deleteActiveOfflineVault();
+    forgetVaultKey();
     setMeta(null);
     setStalePending(null);
     await prepareDevice(password);
@@ -493,6 +535,7 @@ export function OfflineAppBootstrap() {
       await fetch(`/api/offline/devices/${meta.deviceId}`, { method: "DELETE" }).catch(() => undefined);
     }
     await deleteActiveOfflineVault();
+    forgetVaultKey();
     window.location.reload();
   }
 

@@ -23,7 +23,8 @@ import {
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { useOfflineRepository, type OfflineRepository } from "@/lib/offline/repository";
 import { probeServerConnectivity } from "@/lib/offline/connectivity";
-import { reportViewsForGroup, resultsInView, type ReportView } from "@/lib/report-views";
+import { forgetVaultKey } from "@/lib/offline/session-key";
+import { printedTitleFor, reportViewsForGroup, resultsInView, type ReportView } from "@/lib/report-views";
 import type { CatalogOperation } from "@/lib/catalog-operations";
 import type { AnalysisDefinition, CatalogGroup, CatalogSubsection, LabData, LabOrder, ResultValue } from "@/lib/types";
 
@@ -85,7 +86,6 @@ function showPdf(blob: Blob, preview: Window | null, fileName: string) {
 }
 
 export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { fullName: string; role: string } }) {
-  const router = useRouter();
   const sourcePatients = data.patients;
   const sourceAnalyses = data.analyses;
   const [view, setView] = useState<View>("analitica");
@@ -139,9 +139,17 @@ export function LabApp({ data, currentUser }: { data: LabData; currentUser?: { f
   }
 
   async function signOut() {
-    if (isSupabaseConfigured) await createClient().auth.signOut();
-    router.replace("/login");
-    router.refresh();
+    // `signOut()` sin ámbito cierra la sesión en el servidor, y sin internet esa
+    // llamada nunca resuelve: el `await` no pasaba de aquí y el botón parecía
+    // muerto. El ámbito local no necesita red, y aun así se ignora el fallo.
+    if (isSupabaseConfigured) {
+      await createClient().auth.signOut({ scope: "local" }).catch(() => undefined);
+    }
+    forgetVaultKey();
+    // Recarga completa en vez de `router.replace`: hay que soltar la copia
+    // descifrada que vive en memoria. Al arrancar de nuevo, con internet se va al
+    // ingreso principal y sin internet a la pantalla local.
+    window.location.replace(connectivity ? "/app" : "/login");
   }
 
   return (
@@ -923,7 +931,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
         <span><strong><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(item.group)}</span>{item.group}</strong><small>{fmtDate(item.registeredAt)}</small></span><b>{item.results.length}</b>
       </button>)}</nav>
       {activeBatch && <div className="result-groups"><section className="result-group" aria-labelledby="active-result-group">
-        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><button className="button secondary" onClick={() => void printReport([...printResultIds], activeView?.label)} disabled={saving || printing || !printResultIds.size} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : `Imprimir seleccionados (${printResultIds.size})`}</button></div>
+        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><button className="button secondary" onClick={() => void printReport([...printResultIds], printedTitleFor(activeView))} disabled={saving || printing || !printResultIds.size} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : `Imprimir seleccionados (${printResultIds.size})`}</button></div>
         {batchViews.length > 0 && <div className="report-view-picker">
           <span>Informe a imprimir</span>
           <div role="group" aria-label="Vista del informe">
@@ -931,7 +939,9 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
             <button type="button" className={activeViewId === null ? "active" : ""} aria-pressed={activeViewId === null} onClick={() => selectReportView(null)}>Todo</button>
           </div>
           <small>{activeView
-            ? `El informe se titulará «${activeView.label}». Puedes ajustar las casillas antes de imprimir.`
+            ? printedTitleFor(activeView)
+              ? `El informe se titulará «${activeView.label}». Puedes ajustar las casillas antes de imprimir.`
+              : "Puedes ajustar las casillas antes de imprimir."
             : "Elige un informe para marcar sus análisis, o ajusta las casillas a mano."}</small>
         </div>}
         <div className="clinical-results-wrap"><table className="clinical-results-table">

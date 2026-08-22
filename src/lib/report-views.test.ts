@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reportViewsForGroup, resultsInView } from "./report-views";
+import { printedTitleFor, reportViewsForGroup, resultsInView } from "./report-views";
 import { buildReportTableRows } from "./report-pdf";
 
 const result = (analysis: string, subsection?: string) => ({
@@ -70,6 +70,22 @@ describe("vistas de impresión", () => {
   });
 });
 
+describe("título impreso por vista", () => {
+  it("parásito seriado no se titula: su subgrupo ya lleva ese nombre", () => {
+    expect(printedTitleFor(view("parasito-seriado"))).toBeUndefined();
+  });
+
+  it("las demás sí se titulan con su nombre", () => {
+    expect(printedTitleFor(view("reaccion-inflamatoria"))).toBe("REACCIÓN INFLAMATORIA");
+    expect(printedTitleFor(view("parasito-directo"))).toBe("PARÁSITO DIRECTO");
+    expect(printedTitleFor(view("coprofuncional"))).toBe("COPROFUNCIONAL");
+  });
+
+  it("sin vista elegida tampoco hay título", () => {
+    expect(printedTitleFor(null)).toBeUndefined();
+  });
+});
+
 describe("título de la vista en el informe", () => {
   const printable = (analysis: string, subsection?: string) => ({
     ...result(analysis, subsection), value: "1", unit: "", reference: "", flag: "normal",
@@ -78,9 +94,9 @@ describe("título de la vista en el informe", () => {
   it("encabeza el informe con el nombre de la vista", () => {
     const rows = buildReportTableRows(
       [printable("COLOR", "Examen físico"), printable("PARASITOS", "Examen parasitológico")],
-      "PARÁSITO SERIADO",
+      "REACCIÓN INFLAMATORIA",
     );
-    expect(rows[0]).toEqual({ kind: "title", label: "PARÁSITO SERIADO" });
+    expect(rows[0]).toEqual({ kind: "title", label: "REACCIÓN INFLAMATORIA" });
     expect(rows.filter((row) => row.kind === "section").map((row) => row.label))
       .toEqual(["EXAMEN FÍSICO", "EXAMEN PARASITOLÓGICO"]);
   });

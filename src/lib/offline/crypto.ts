@@ -81,6 +81,15 @@ export async function unwrapDataKey(value: EncryptedValue, wrappingKey: CryptoKe
   return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
 }
 
+/** Para conservar la sesión al recargar; ver `offline/session-key.ts`. */
+export async function exportDataKey(key: CryptoKey) {
+  return toBase64(new Uint8Array(await crypto.subtle.exportKey("raw", key)));
+}
+
+export async function importDataKey(value: string) {
+  return crypto.subtle.importKey("raw", fromBase64(value), { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+}
+
 export function createSearchKey(dataKey: CryptoKey) {
   let derived = searchKeys.get(dataKey);
   if (!derived) {
