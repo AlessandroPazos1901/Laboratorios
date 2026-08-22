@@ -1,4 +1,5 @@
 import { canonicalGroupOrder } from "@/lib/catalog-order";
+import type { CatalogOperation } from "@/lib/catalog-operations";
 import type { AnalysisDefinition, CatalogGroup } from "@/lib/types";
 
 type AnalysisGroupSource = Pick<AnalysisDefinition, "group" | "groupId">;
@@ -45,7 +46,7 @@ export function catalogSubsectionRenameRequest(input: {
   groupId: string;
   currentName: string;
   nextName: string;
-}) {
+}): CatalogOperation {
   return input.subsectionId.startsWith("legacy:")
     ? {
         action: "subsection.renameLegacy",
@@ -64,7 +65,7 @@ export function catalogSubsectionDeleteRequest(input: {
   subsectionId: string;
   groupId: string;
   currentName: string;
-}) {
+}): CatalogOperation {
   return input.subsectionId.startsWith("legacy:")
     ? {
         action: "subsection.deleteLegacy",

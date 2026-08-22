@@ -1,11 +1,12 @@
 "use client";
 
-import { Activity, ArrowRight, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { ArrowRight, Eye, EyeOff } from "lucide-react";
+import Image from "next/image";
 import { useState } from "react";
-import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { createClient, isSupabaseConfigured, resolveLoginEmail } from "@/lib/supabase/client";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
   const [error, setError] = useState("");
@@ -19,45 +20,59 @@ export default function LoginPage() {
       return;
     }
     setLoading(true);
-    const { error: authError } = await createClient().auth.signInWithPassword({ email, password });
+    const email = await resolveLoginEmail(username);
+    const { error: authError } = email
+      ? await createClient().auth.signInWithPassword({ email, password })
+      : { error: new Error("unknown_user") };
     setLoading(false);
-    if (authError) return setError("Correo o contrasena incorrectos.");
+    if (authError) return setError("Usuario o contrasena incorrectos.");
     window.location.replace("/app");
   }
 
   async function recoverPassword() {
     setError("");
-    if (!email) return setError("Ingresa tu correo para solicitar la recuperacion.");
+    if (!username) return setError("Ingresa tu usuario para solicitar la recuperacion.");
     if (!isSupabaseConfigured) return setError("La recuperacion de contrasena aun no esta disponible. Comunicate con el administrador.");
     setLoading(true);
-    const { error: recoveryError } = await createClient().auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/reset-password`,
-    });
+    const email = await resolveLoginEmail(username);
+    const { error: recoveryError } = email
+      ? await createClient().auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset-password` })
+      : { error: null };
     setLoading(false);
     if (recoveryError) return setError("No se pudo enviar la recuperacion. Intenta nuevamente.");
-    setError("Si el correo esta registrado, recibira instrucciones para crear una nueva contrasena.");
+    setError("Si el usuario esta registrado, recibira instrucciones en su correo para crear una nueva contrasena.");
   }
 
   return (
     <main className="login-shell">
       <section className="login-context" aria-label="Informacion del sistema">
-        <div className="brand-mark"><Activity aria-hidden="true" /><span>LIMS Jose</span></div>
-        <div className="login-message">
-          <p className="eyebrow">Area de trabajo clinica</p>
-          <h1>Resultados confiables.<br />Trazabilidad completa.</h1>
-          <p>Gestion diaria de pacientes, ordenes, resultados e informes en un solo lugar.</p>
-        </div>
-        <div className="security-note"><ShieldCheck aria-hidden="true" /><span>Acceso restringido al personal autorizado</span></div>
+        <Image
+          className="login-context-image"
+          src="/logo-login.png"
+          alt="Laboratorio Clinico del Centro de Salud Acomayo"
+          fill
+          priority
+          sizes="46vw"
+        />
       </section>
       <section className="login-panel">
         <form className="login-card" onSubmit={signIn}>
+          <div className="login-mobile-visual">
+            <Image
+              src="/logo-login.png"
+              alt="Laboratorio Clinico del Centro de Salud Acomayo"
+              width={1531}
+              height={1563}
+              sizes="(max-width: 820px) calc(100vw - 48px), 1px"
+            />
+          </div>
           <div>
             <p className="eyebrow">Bienvenido</p>
             <h2>Iniciar sesion</h2>
             <p className="muted">Ingresa con la cuenta compartida autorizada del laboratorio.</p>
           </div>
-          <label>Correo electronico
-            <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="nombre@laboratorio.pe" required />
+          <label>Usuario
+            <input type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="laboratorio" required />
           </label>
           <label>Contrasena
             <span className="password-field">

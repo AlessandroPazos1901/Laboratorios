@@ -5,7 +5,7 @@ import {
 import { canonicalAnalysisOrder, canonicalGroupOrder } from "@/lib/catalog-order";
 import { formatNumericResult } from "@/lib/clinical";
 import {
-  buildResultPresentationRows, formatResultReference, formatResultUnit, type ResultPresentationRow,
+  buildResultPresentationRows, formatDisplayReference, formatDisplayUnit, type ResultPresentationRow,
 } from "@/lib/result-presentation";
 
 const LETTER: [number, number] = [612, 792];
@@ -18,6 +18,17 @@ const TABLE_HEADER = rgb(0.84, 0.84, 0.84);
 const GROUP_HEADER = rgb(0.90, 0.95, 0.95);
 const SECTION_HEADER = rgb(0.94, 0.96, 0.96);
 const TABLE_COLUMNS = [MARGIN, MARGIN + 230, MARGIN + 340, MARGIN + 415, MARGIN + CONTENT_WIDTH] as const;
+// Métrica compacta: un informe corriente debe caber en una sola hoja Carta.
+const ROW_LINE = 9;
+const ROW_MIN = 16;
+const TITLE_HEIGHT = 18;
+const COLUMN_HEIGHT = 15;
+const HEADER_HEIGHT = TITLE_HEIGHT + COLUMN_HEIGHT;
+const CARD_HEIGHT = 52;
+const CARD_GAP = 10;
+const LOGO_MAX_HEIGHT = 64;
+const PAGE_BOTTOM = 40;
+const GROUP_GAP = 8;
 
 export type LabReportResult = {
   group: string;
@@ -45,6 +56,8 @@ export type LabReportData = {
   age: string;
   revision: number;
   printedAt: string;
+  /** Nombre de la vista impresa, p. ej. «PARÁSITO SERIADO». */
+  title?: string;
   results: LabReportResult[];
 };
 
@@ -60,27 +73,34 @@ const normalizeReportLabel = (value: string) => value
   .trim();
 
 function reportGroupTitle(group: string) {
-  return normalizeReportLabel(group).includes("UROANAL") ? "SECCIÓN: ORINAS" : group;
+  const normalized = normalizeReportLabel(group);
+  if (normalized.includes("UROANAL")) return "SECCIÓN: ORINAS";
+  // El grupo se llama MICROBIOLOGIA en el catálogo, pero el informe que recibe
+  // el paciente es el de heces.
+  if (normalized.includes("MICROBIOLOG")) return "SECCIÓN: HECES";
+  return group;
 }
 
-export function buildReportTableRows(results: LabReportResult[]): LabReportTableRow[] {
+export function buildReportTableRows(results: LabReportResult[], title?: string): LabReportTableRow[] {
   const rows: LabReportTableRow[] = buildResultPresentationRows(results);
   const urinalysis = results.some((result) => normalizeReportLabel(result.group).includes("UROANAL"));
-  if (!urinalysis) return rows;
+  // El título de la vista manda sobre el fijo de uroanálisis.
+  const heading = title?.trim() || (urinalysis ? "EXAMEN COMPLETO DE ORINA" : "");
+  if (!heading) return rows;
   return [
-    { kind: "title", label: "EXAMEN COMPLETO DE ORINA" },
-    ...rows.map((row) => row.kind === "section" && row.label === "EXAMEN BIOQUÍMICO"
+    { kind: "title", label: heading },
+    ...rows.map((row) => urinalysis && row.kind === "section" && row.label === "EXAMEN BIOQUÍMICO"
       ? { ...row, label: "EXAMEN QUÍMICO" }
       : row),
   ];
 }
 
-export function formatReportUnit(unit: string, analysisCode?: string) {
-  return formatResultUnit(unit, analysisCode);
+export function formatReportUnit(unit: string) {
+  return formatDisplayUnit(unit);
 }
 
-export function formatReportReference(reference: string, unit: string, analysisCode?: string) {
-  return formatResultReference(reference, unit, analysisCode);
+export function formatReportReference(reference: string, unit: string) {
+  return formatDisplayReference(reference, unit);
 }
 
 function splitText(text: string, font: PDFFont, size: number, maxWidth: number) {
@@ -109,6 +129,17 @@ function drawLines(page: PDFPage, lines: string[], x: number, y: number, font: P
   lines.forEach((line, index) => page.drawText(line, { x, y: y - index * lineHeight, font, size, color }));
 }
 
+// Centra cada línea dentro de su columna, como en los informes impresos del laboratorio.
+function drawCenteredLines(page: PDFPage, lines: string[], left: number, right: number, y: number, font: PDFFont, size: number, color = INK, lineHeight = size + 2) {
+  lines.forEach((line, index) => page.drawText(line, {
+    x: left + Math.max(0, (right - left - font.widthOfTextAtSize(line, size)) / 2),
+    y: y - index * lineHeight,
+    font,
+    size,
+    color,
+  }));
+}
+
 function drawRoundedBorder(page: PDFPage, x: number, y: number, width: number, height: number, radius: number) {
   const k = 0.5522847498;
   page.pushOperators(
@@ -126,8 +157,7 @@ function drawRoundedBorder(page: PDFPage, x: number, y: number, width: number, h
 }
 
 function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, bold: PDFFont, top: number) {
-  const height = 66;
-  drawRoundedBorder(page, MARGIN, top - height, CONTENT_WIDTH, height, 10);
+  drawRoundedBorder(page, MARGIN, top - CARD_HEIGHT, CONTENT_WIDTH, CARD_HEIGHT, 8);
 
   const rows = [
     ["ORDEN", data.orderCode ?? `ECOLAB-${data.orderNumber}`, "FECHA", new Date(data.orderedAt).toLocaleDateString("es-PE")],
@@ -135,7 +165,7 @@ function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, b
     ["DNI", data.documentNumber, "EDAD", data.age],
   ];
   rows.forEach((row, index) => {
-    const y = top - 17 - index * 19;
+    const y = top - 14 - index * 15;
     page.drawText(row[0], { x: MARGIN + 18, y, size: 8.5, font: bold, color: INK });
     page.drawText(":", { x: MARGIN + 78, y, size: 8.5, font: bold, color: INK });
     page.drawText(clean(row[1]).slice(0, 44), { x: MARGIN + 90, y, size: 8.5, font: regular, color: INK, maxWidth: 260 });
@@ -146,22 +176,20 @@ function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, b
 }
 
 function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: number, continuation = false) {
-  const titleHeight = 25;
-  const columnHeight = 24;
-  const bottom = top - titleHeight - columnHeight;
-  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: columnHeight, color: TABLE_HEADER });
-  page.drawRectangle({ x: MARGIN, y: top - titleHeight, width: CONTENT_WIDTH, height: titleHeight, color: GROUP_HEADER });
-  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: titleHeight + columnHeight, borderColor: INK, borderWidth: 0.8 });
-  page.drawLine({ start: { x: MARGIN, y: top - titleHeight }, end: { x: MARGIN + CONTENT_WIDTH, y: top - titleHeight }, thickness: 0.8, color: INK });
+  const bottom = top - HEADER_HEIGHT;
+  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: COLUMN_HEIGHT, color: TABLE_HEADER });
+  page.drawRectangle({ x: MARGIN, y: top - TITLE_HEIGHT, width: CONTENT_WIDTH, height: TITLE_HEIGHT, color: GROUP_HEADER });
+  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: HEADER_HEIGHT, borderColor: INK, borderWidth: 0.8 });
+  page.drawLine({ start: { x: MARGIN, y: top - TITLE_HEIGHT }, end: { x: MARGIN + CONTENT_WIDTH, y: top - TITLE_HEIGHT }, thickness: 0.8, color: INK });
   TABLE_COLUMNS.slice(1, -1).forEach((x) => page.drawLine({
-    start: { x, y: bottom }, end: { x, y: top - titleHeight }, thickness: 0.8, color: INK,
+    start: { x, y: bottom }, end: { x, y: top - TITLE_HEIGHT }, thickness: 0.8, color: INK,
   }));
 
   const title = clean(`${reportGroupTitle(group)}${continuation ? " - CONTINUACION" : ""}`).toUpperCase();
   page.drawText(title, {
-    x: MARGIN + (CONTENT_WIDTH - bold.widthOfTextAtSize(title, 10)) / 2,
-    y: top - 16,
-    size: 10,
+    x: MARGIN + (CONTENT_WIDTH - bold.widthOfTextAtSize(title, 9.5)) / 2,
+    y: top - 13,
+    size: 9.5,
     font: bold,
     color: INK,
   });
@@ -171,7 +199,7 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
     const width = TABLE_COLUMNS[index + 1] - left;
     page.drawText(clean(label), {
       x: left + (width - bold.widthOfTextAtSize(clean(label), 8)) / 2,
-      y: bottom + 7,
+      y: bottom + 5,
       size: 8,
       font: bold,
       color: INK,
@@ -180,46 +208,48 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
   return bottom;
 }
 
+function resultRowLines(row: Extract<LabReportTableRow, { kind: "result" }>, regular: PDFFont, bold: PDFFont, analysisX: number) {
+  return {
+    analysis: splitText(row.result.analysis, regular, 8.5, TABLE_COLUMNS[1] - analysisX - 5),
+    result: splitText(formatNumericResult(row.result.value, row.result.unit) || "-", bold, 8.5, TABLE_COLUMNS[2] - TABLE_COLUMNS[1] - 8),
+    unit: splitText(formatReportUnit(row.result.unit), regular, 8, TABLE_COLUMNS[3] - TABLE_COLUMNS[2] - 8),
+    reference: splitText(formatReportReference(row.result.reference, row.result.unit), regular, 8, TABLE_COLUMNS[4] - TABLE_COLUMNS[3] - 8),
+  };
+}
+
 function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont) {
   if (row.kind === "title") {
     const lines = splitText(row.label, bold, 9, CONTENT_WIDTH - 12);
-    return Math.max(23, lines.length * 10 + 9);
+    return Math.max(ROW_MIN + 1, lines.length * ROW_LINE + 7);
   }
   if (row.kind === "section") {
     const lines = splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12);
-    return Math.max(22, lines.length * 10 + 8);
+    return Math.max(ROW_MIN, lines.length * ROW_LINE + 6);
   }
-  const analysisWidth = TABLE_COLUMNS[1] - TABLE_COLUMNS[0] - 10 - row.indent * 13;
-  const analysisLines = splitText(row.result.analysis, regular, 8.5, analysisWidth);
-  const resultLines = splitText(formatNumericResult(row.result.value, row.result.unit, row.result.analysisCode) || "-", bold, 8.5, TABLE_COLUMNS[2] - TABLE_COLUMNS[1] - 8);
-  const unitLines = splitText(formatReportUnit(row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[3] - TABLE_COLUMNS[2] - 8);
-  const referenceLines = splitText(formatReportReference(row.result.reference, row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[4] - TABLE_COLUMNS[3] - 8);
-  return Math.max(22, Math.max(analysisLines.length, resultLines.length, unitLines.length, referenceLines.length) * 10 + 8);
+  const lines = resultRowLines(row, regular, bold, MARGIN + 5 + row.indent * 13);
+  const tallest = Math.max(lines.analysis.length, lines.result.length, lines.unit.length, lines.reference.length);
+  return Math.max(ROW_MIN, tallest * ROW_LINE + 6);
 }
 
 function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height: number, regular: PDFFont, bold: PDFFont) {
   const bottom = top - height;
   if (row.kind === "title") {
-    drawLines(page, splitText(row.label, bold, 9, CONTENT_WIDTH - 12), MARGIN + 6, top - 15, bold, 9, INK, 10);
+    drawLines(page, splitText(row.label, bold, 9, CONTENT_WIDTH - 12), MARGIN + 6, top - 11, bold, 9, INK, ROW_LINE);
     return bottom;
   }
   if (row.kind === "section") {
     page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height, color: SECTION_HEADER });
-    drawLines(page, splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12), MARGIN + 6, top - 14, bold, 8.5, INK, 10);
+    drawLines(page, splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12), MARGIN + 6, top - 11, bold, 8.5, INK, ROW_LINE);
     return bottom;
   }
 
-  const baseline = top - 14;
+  const baseline = top - 11;
   const analysisX = MARGIN + 5 + row.indent * 13;
-  const analysisWidth = TABLE_COLUMNS[1] - analysisX - 5;
-  const analysisLines = splitText(row.result.analysis, regular, 8.5, analysisWidth);
-  const resultLines = splitText(formatNumericResult(row.result.value, row.result.unit, row.result.analysisCode) || "-", bold, 8.5, TABLE_COLUMNS[2] - TABLE_COLUMNS[1] - 8);
-  const unitLines = splitText(formatReportUnit(row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[3] - TABLE_COLUMNS[2] - 8);
-  const referenceLines = splitText(formatReportReference(row.result.reference, row.result.unit, row.result.analysisCode), regular, 8, TABLE_COLUMNS[4] - TABLE_COLUMNS[3] - 8);
-  drawLines(page, analysisLines, analysisX, baseline, regular, 8.5, INK, 10);
-  drawLines(page, resultLines, TABLE_COLUMNS[1] + 4, baseline, bold, 8.5, row.result.flag === "critical" ? CRITICAL : INK, 10);
-  drawLines(page, unitLines, TABLE_COLUMNS[2] + 4, baseline, regular, 8, INK, 10);
-  drawLines(page, referenceLines, TABLE_COLUMNS[3] + 4, baseline, regular, 8, INK, 10);
+  const lines = resultRowLines(row, regular, bold, analysisX);
+  drawLines(page, lines.analysis, analysisX, baseline, regular, 8.5, INK, ROW_LINE);
+  drawCenteredLines(page, lines.result, TABLE_COLUMNS[1], TABLE_COLUMNS[2], baseline, bold, 8.5, row.result.flag === "critical" ? CRITICAL : INK, ROW_LINE);
+  drawCenteredLines(page, lines.unit, TABLE_COLUMNS[2], TABLE_COLUMNS[3], baseline, regular, 8, INK, ROW_LINE);
+  drawCenteredLines(page, lines.reference, TABLE_COLUMNS[3], TABLE_COLUMNS[4], baseline, regular, 8, INK, ROW_LINE);
   return bottom;
 }
 
@@ -241,39 +271,40 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
   const logo = logoBytes[0] === 0x89 && logoBytes[1] === 0x50
     ? await pdf.embedPng(logoBytes)
     : await pdf.embedJpg(logoBytes);
-  const freshTableTop = 792 - MARGIN - CONTENT_WIDTH / (logo.width / logo.height) - 8 - 84;
-  const freshBodySpace = freshTableTop - 49 - 58;
+  const logoHeight = Math.min(LOGO_MAX_HEIGHT, CONTENT_WIDTH / (logo.width / logo.height));
+  const freshTableTop = 792 - MARGIN - logoHeight - 6 - CARD_HEIGHT - CARD_GAP;
+  const freshBodySpace = freshTableTop - HEADER_HEIGHT - PAGE_BOTTOM;
   let page: PDFPage | undefined;
   let y = 0;
 
   function drawLogo(target: PDFPage, image: PDFImage) {
-    const width = CONTENT_WIDTH;
-    const height = width / (image.width / image.height);
-    target.drawImage(image, { x: MARGIN, y: 792 - MARGIN - height, width, height });
-    return 792 - MARGIN - height - 8;
+    const height = logoHeight;
+    const width = height * (image.width / image.height);
+    target.drawImage(image, { x: MARGIN + (CONTENT_WIDTH - width) / 2, y: 792 - MARGIN - height, width, height });
+    return 792 - MARGIN - height - 6;
   }
 
   function addPage(group: string, continuation = false) {
     page = pdf.addPage(LETTER);
     const cardTop = drawLogo(page, logo);
     drawPatientCard(page, data, regular, bold, cardTop);
-    y = drawTableHeader(page, bold, group, cardTop - 84, continuation);
+    y = drawTableHeader(page, bold, group, cardTop - CARD_HEIGHT - CARD_GAP, continuation);
   }
 
   for (const [group, results] of groupResults(data.results)) {
-    const rows = buildReportTableRows(results);
+    const rows = buildReportTableRows(results, data.title);
     const firstRowHeight = rows[0] ? measureTableRow(rows[0], regular, bold) : 0;
     const firstFollowingRows = rows[0]?.kind === "title"
       ? rows.slice(1, 3)
       : rows[0]?.kind === "section"
         ? rows.slice(1, 2)
         : [];
-    const minimumGroupHeight = 12 + 49 + firstRowHeight
+    const minimumGroupHeight = GROUP_GAP + HEADER_HEIGHT + firstRowHeight
       + firstFollowingRows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
     const rowsHeight = rows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
-    const requiredHeight = rowsHeight <= freshBodySpace ? 12 + 49 + rowsHeight : minimumGroupHeight;
-    if (!page || y - requiredHeight < 58) addPage(group);
-    else y = drawTableHeader(page, bold, group, y - 12);
+    const requiredHeight = rowsHeight <= freshBodySpace ? GROUP_GAP + HEADER_HEIGHT + rowsHeight : minimumGroupHeight;
+    if (!page || y - requiredHeight < PAGE_BOTTOM) addPage(group);
+    else y = drawTableHeader(page, bold, group, y - GROUP_GAP);
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowHeight = measureTableRow(row, regular, bold);
@@ -283,7 +314,7 @@ export async function buildLabReportPdf(data: LabReportData, logoBytes: Uint8Arr
           ? rows.slice(index + 1, index + 2)
           : [];
       const nextHeight = followingRows.reduce((total, followingRow) => total + measureTableRow(followingRow, regular, bold), 0);
-      if (y - rowHeight - nextHeight < 58) addPage(group, true);
+      if (y - rowHeight - nextHeight < PAGE_BOTTOM) addPage(group, true);
       y = drawTableRow(page!, row, y, rowHeight, regular, bold);
     }
   }

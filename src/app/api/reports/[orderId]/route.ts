@@ -21,8 +21,10 @@ function resultText(row: { numeric_value: number | null; qualitative_value: stri
 export async function POST(request: Request, context: { params: Promise<{ orderId: string }> }) {
   const { orderId } = await context.params;
   if (!UUID.test(orderId)) return NextResponse.json({ error: "Identificador inválido." }, { status: 400 });
-  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown; resultIds?: unknown } | null;
+  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown; resultIds?: unknown; title?: unknown } | null;
   const targetGroup = typeof body?.group === "string" ? body.group.trim() : "";
+  // Nombre de la vista impresa. Se acota porque va tal cual al PDF.
+  const title = typeof body?.title === "string" ? body.title.trim().slice(0, 80) : "";
   const targetBatch = typeof body?.batchId === "string" && UUID.test(body.batchId) ? body.batchId : "";
   const resultIds = Array.isArray(body?.resultIds)
     && body.resultIds.every((id) => typeof id === "string" && UUID.test(id))
@@ -134,6 +136,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     age: formatPatientAgeAt(patientResult.data.birth_date ?? "", order.ordered_at),
     revision: revision.revision,
     printedAt: new Date().toISOString(),
+    title,
     results: printable,
   }, logoBytes);
   return new NextResponse(Buffer.from(bytes), {

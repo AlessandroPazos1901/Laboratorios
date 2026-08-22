@@ -1,13 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { PIN_PATTERN } from "../../src/lib/offline/crypto";
 
 test("publica un manifest instalable y un fallback sin datos clínicos", async ({ page, context }) => {
   const manifest = await page.request.get("/manifest.webmanifest");
   expect(manifest.ok()).toBeTruthy();
   expect(await manifest.json()).toMatchObject({ display: "standalone", start_url: "/offline" });
-  expect(PIN_PATTERN.test("1234")).toBeTruthy();
-  expect(PIN_PATTERN.test("123")).toBeFalsy();
-  expect(PIN_PATTERN.test("12345")).toBeFalsy();
 
   await page.goto("/offline");
   await expect(page.getByText(/modo offline|continuidad operativa/i).first()).toBeVisible();

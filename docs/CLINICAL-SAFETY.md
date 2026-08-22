@@ -26,9 +26,13 @@ El responsable legal debe aprobar privacidad, retención, contratos de encargado
   analista declarado.
 - Nacimiento: se registra solo la fecha. En neonatos, la interfaz expresa la
   edad en días y no inventa horas que no fueron capturadas.
-- Hemograma relacionado: al ingresar hematíes, hemoglobina o hematocrito, la
-  captura completa los otros dos mediante `Hto = Hb × 3`, `Hb = Hto / 3` y
-  `hematíes = Hb / 3`; cualquier edición posterior recalcula la misma tanda.
+- Hemograma relacionado: hematocrito es el dato directo; la captura calcula
+  `Hb = Hto / 3.01` y `hematíes = Hb × 320` (conversión de miles a la unidad
+  de millones usada por el catálogo). Hemoglobina y hematíes permanecen
+  bloqueados y cualquier edición posterior recalcula la misma tanda.
+- Perfil lipídico relacionado: colesterol total y triglicéridos son directos;
+  HDL (`total × 0.17`), VLDL (`triglicéridos / 5`) y LDL quedan bloqueados. LDL
+  usa `total - VLDL - HDL`, o `total × 0.67` cuando no hay triglicéridos.
 - Orden canónico: captura, almacenamiento e impresión respetan el orden clínico
   versionado del catálogo y nunca ordenan los análisis alfabéticamente.
 - Evolución: nunca mezcla silenciosamente unidades o métodos incompatibles.

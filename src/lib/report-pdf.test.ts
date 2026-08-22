@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildLabReportPdf, buildReportTableRows, formatReportReference, formatReportUnit, type LabReportResult,
 } from "./report-pdf";
-import { resultStorageValue } from "./result-presentation";
+import { formatNumericResult } from "./clinical";
+import { entryFullFigure, resultEntryValue, resultStorageValue } from "./result-presentation";
 
 const reportResult = (analysisCode: string, analysis: string, group = "HEMATOLOGÍA"): LabReportResult => ({
   group,
@@ -43,6 +44,39 @@ describe("buildLabReportPdf", () => {
       "S:SERIE BLANCA",
       "R:LEUCOCITOS",
     ]);
+  });
+
+  it("agrupa un análisis rezagado con su subgrupo en vez de repetir el título", () => {
+    const rows = buildReportTableRows([
+      { ...reportResult("URO-COLOR", "COLOR", "UROANÁLISIS"), subsection: "Examen físico" },
+      { ...reportResult("URO-ASP", "ASPECTO", "UROANÁLISIS"), subsection: "Examen físico" },
+      { ...reportResult("URO-GLU", "GLUCOSA", "UROANÁLISIS"), subsection: "Examen bioquímico" },
+      { ...reportResult("URO-REAC", "REACCION", "UROANÁLISIS"), subsection: "Examen físico" },
+    ]);
+
+    expect(rows.map((row) => row.kind === "result" ? `R:${row.result.analysis}` : `S:${row.label}`)).toEqual([
+      "S:EXAMEN COMPLETO DE ORINA",
+      "S:EXAMEN FÍSICO",
+      "R:COLOR",
+      "R:ASPECTO",
+      "R:REACCION",
+      "S:EXAMEN QUÍMICO",
+      "R:GLUCOSA",
+    ]);
+  });
+
+  it("cierra con los análisis sin subgrupo y no les pone título", () => {
+    const rows = buildReportTableRows([
+      { ...reportResult("GRA-LIB", "OBSERVACIONES", "GRAM") },
+      { ...reportResult("GRA-CEL", "CÉLULAS CLAVE", "GRAM"), subsection: "Examen microscópico" },
+    ]);
+
+    expect(rows.map((row) => row.kind === "result" ? `R:${row.result.analysis}` : `S:${row.label}`)).toEqual([
+      "S:EXAMEN MICROSCÓPICO",
+      "R:CÉLULAS CLAVE",
+      "R:OBSERVACIONES",
+    ]);
+    expect(rows.at(-1)).toMatchObject({ kind: "result", indent: 0 });
   });
 
   it("organiza hematología con el hemograma y su fórmula indentados", () => {
@@ -130,25 +164,44 @@ describe("buildLabReportPdf", () => {
     ]);
   });
 
-  it("evita repetir las unidades dentro de los valores normales", () => {
-    expect(formatReportUnit("millones/µL", "HEM-RBC")).toBe("10^6/µL");
-    expect(formatReportUnit("/µL", "HEM-WBC")).toBe("10^3/µL");
+  it("imprime las unidades sin abreviar y sin repetirlas en los valores normales", () => {
+    expect(formatReportUnit("millones/µL")).toBe("/µL");
+    expect(formatReportUnit("/µL")).toBe("/µL");
     expect(formatReportUnit("minutos")).toBe("min");
     expect(formatReportUnit("mm/1ra hora")).toBe("mm/h");
-    expect(formatReportReference("4.0 - 5.9 millones/µL", "millones/µL", "HEM-RBC")).toBe("4.0 - 5.9");
-    expect(formatReportReference("4,500 - 11,000 /µL", "/µL", "HEM-WBC")).toBe("4.5 - 11");
-    expect(formatReportReference("150,000 - 400,000 /µL", "/µL", "HEM-PLT")).toBe("150 - 400");
+    expect(formatReportReference("4.0 - 5.9 millones/µL", "millones/µL")).toBe("4,000,000 - 5,900,000");
+    expect(formatReportReference("4,000,000 - 5,900,000 /µL", "millones/µL")).toBe("4,000,000 - 5,900,000");
+    expect(formatReportReference("4,500 - 11,000 /µL", "/µL")).toBe("4,500 - 11,000");
+    expect(formatReportReference("150,000 - 400,000 /µL", "/µL")).toBe("150,000 - 400,000");
     expect(formatReportReference("36% - 53%", "%")).toBe("36 - 53");
     expect(formatReportReference("Menos de 200 mg/dL", "mg/dL")).toBe("< 200");
     expect(formatReportReference("Hombres: 3.5 - 7.2 mg/dL\nMujeres: 2.6 - 6.0 mg/dL", "mg/dL"))
       .toBe("Hombres: 3.5 - 7.2\nMujeres: 2.6 - 6.0");
   });
 
-  it("convierte la captura abreviada a la cifra que se guarda", () => {
+  it("convierte la captura abreviada a la cifra que se guarda y de vuelta", () => {
     expect(resultStorageValue("5", "HEM-WBC")).toBe("5000");
     expect(resultStorageValue("5.5", "HEM-WBC")).toBe("5500");
     expect(resultStorageValue("250", "HEM-PLT")).toBe("250000");
     expect(resultStorageValue("5.33", "HEM-RBC")).toBe("5.33");
+    expect(resultEntryValue("5000", "HEM-WBC")).toBe("5");
+    expect(resultEntryValue("250000", "HEM-PLT")).toBe("250");
+    expect(resultEntryValue("5.33", "HEM-RBC")).toBe("5.33");
+    expect(resultEntryValue("1200", "BIO-GLU")).toBe("1200");
+  });
+
+  it("muestra la cifra completa con separador de miles", () => {
+    expect(formatNumericResult("5000", "/µL")).toBe("5,000");
+    expect(formatNumericResult("250000", "/µL")).toBe("250,000");
+    expect(formatNumericResult("4.5", "millones/µL")).toBe("4,500,000");
+  });
+
+  it("anticipa en la captura la cifra que se guardará, solo donde la escala difiere", () => {
+    expect(entryFullFigure("5000", "/µL", "HEM-WBC")).toBe("5,000 /µL");
+    expect(entryFullFigure("250000", "/µL", "HEM-PLT")).toBe("250,000 /µL");
+    expect(entryFullFigure("4.5", "millones/µL", "HEM-RBC")).toBe("4,500,000 /µL");
+    expect(entryFullFigure("95", "mg/dL", "BIO-GLU")).toBe("");
+    expect(entryFullFigure("", "/µL", "HEM-WBC")).toBe("");
   });
 
   it("genera una muestra visual con todos los grupos jerarquizados", async () => {
@@ -208,7 +261,8 @@ describe("buildLabReportPdf", () => {
       results: [...orderedGroup(10, hematology), ...biochemistry, ...immunology, ...urine, ...stool, ...vaginal],
     }, logo);
     const pdf = await PDFDocument.load(bytes);
-    expect(pdf.getPageCount()).toBeGreaterThanOrEqual(4);
+    // Seis grupos y 54 análisis: el diseño compacto debe mantenerlos en pocas hojas.
+    expect(pdf.getPageCount()).toBeLessThanOrEqual(3);
     if (process.env.WRITE_REPORT_SAMPLE === "1") {
       const output = path.join(process.cwd(), "tmp", "pdfs");
       await mkdir(output, { recursive: true });
@@ -245,6 +299,30 @@ describe("buildLabReportPdf", () => {
       await mkdir(output, { recursive: true });
       await writeFile(path.join(output, "informe-laboratorio-muestra.pdf"), bytes);
     }
+  });
+
+  it("mantiene un hemograma completo en una sola hoja", async () => {
+    const logo = await readFile(path.join(process.cwd(), "public", "logo_laboratorio.png"));
+    const bytes = await buildLabReportPdf({
+      orderNumber: 4665,
+      orderedAt: "2026-08-11T16:20:00-05:00",
+      patientName: "Paciente de prueba",
+      documentNumber: "70421856",
+      sex: "Femenino",
+      age: "34 años",
+      revision: 1,
+      printedAt: "2026-08-11T16:30:00-05:00",
+      results: orderedGroup(10, [
+        reportResult("HEM-RBC", "HEMATIES"), reportResult("HEM-HB", "HEMOGLOBINA"),
+        reportResult("HEM-HCT", "HEMATOCRITO"), reportResult("HEM-WBC", "LEUCOCITOS"),
+        reportResult("HEM-ABA", "ABASTONADOS"), reportResult("HEM-NEU", "SEGMENTADOS"),
+        reportResult("HEM-EOS", "EOSINOFILOS"), reportResult("HEM-BAS", "BASOFILOS"),
+        reportResult("HEM-MON", "MONOCITOS"), reportResult("HEM-LIN", "LINFOCITOS"),
+        reportResult("HEM-PLT", "PLAQUETAS"), reportResult("HEM-GRF", "GRUPO Y FACTOR"),
+        reportResult("HEM-TC", "T.C."), reportResult("HEM-TS", "T.S."), reportResult("HEM-VSG", "V.S.G."),
+      ]),
+    }, logo);
+    expect((await PDFDocument.load(bytes)).getPageCount()).toBe(1);
   });
 
   it("aprovecha una misma página para grupos pequeños", async () => {

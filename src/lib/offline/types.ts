@@ -7,7 +7,8 @@ export type OfflineOperationKind =
   | "patient.upsert"
   | "patient.update"
   | "analysis.register"
-  | "results.save";
+  | "results.save"
+  | "catalog.apply";
 
 export type OfflineOperationStatus = "pending" | "syncing" | "applied" | "conflict" | "blocked";
 
@@ -68,8 +69,8 @@ export type OfflineVaultSnapshot = {
 export type OfflineRuntimeStatus =
   | "disabled"
   | "loading"
-  | "not-prepared"
-  | "locked"
-  | "expired"
+  // Una sola puerta para «no preparado», «bloqueado» y «autorización vencida»:
+  // el formulario de ingreso resuelve los tres casos con el mismo credencial.
+  | "needs-access"
   | "unlocked"
   | "error";

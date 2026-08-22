@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { biochemistryFormulaKey, calculateAgeAt, expandMillonesText, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isCalculatedHematologyResult, isMissingBatchSchema, isValidDni, linkedBiochemistryValues, linkedHematologyValues, normalizeDocument } from "./clinical";
+import { biochemistryFormulaKey, calculateAgeAt, flagNumericResult, formatNumericResult, formatPatientAgeAt, formatReferenceRange, groupResultsByBatch, isCalculatedAnalysisResult, isCalculatedHematologyResult, isMissingBatchSchema, isValidDni, linkedBiochemistryValues, linkedHematologyValues, normalizeDocument, numericLimits, parseReferenceLimits, resultFlagFor, resultNumericLimits } from "./clinical";
 import type { ResultValue } from "./types";
 
 describe("calculateAgeAt", () => {
@@ -52,24 +52,12 @@ describe("formatNumericResult", () => {
   it("deja intacto un valor vacío", () => {
     expect(formatNumericResult("")).toBe("");
   });
-  it("mantiene abreviados los resultados expresados en millones", () => {
-    expect(formatNumericResult("3.78", "millones/µL", "HEM-RBC")).toBe("3.78");
+  it("expande los resultados en millones a su cifra completa", () => {
+    expect(formatNumericResult("3.78", "millones/µL")).toBe("3,780,000");
   });
-  it("muestra leucocitos y plaquetas en miles", () => {
-    expect(formatNumericResult("5000", "/µL", "HEM-WBC")).toBe("5");
-    expect(formatNumericResult("250000", "/µL", "HEM-PLT")).toBe("250");
-  });
-});
-
-describe("expandMillonesText", () => {
-  it("quita 'millones' y deja la unidad tal como la usan otros análisis", () => {
-    expect(expandMillonesText("millones/µL")).toBe("/µL");
-  });
-  it("expande los números de un rango de referencia en millones", () => {
-    expect(expandMillonesText("4.0 - 5.9 millones/µL")).toBe("4,000,000 - 5,900,000 /µL");
-  });
-  it("deja intacto un texto sin 'millones'", () => {
-    expect(expandMillonesText("150,000 - 400,000 /µL")).toBe("150,000 - 400,000 /µL");
+  it("muestra leucocitos y plaquetas con su cifra completa", () => {
+    expect(formatNumericResult("5000", "/µL")).toBe("5,000");
+    expect(formatNumericResult("250000", "/µL")).toBe("250,000");
   });
 });
 
@@ -93,23 +81,144 @@ describe("DNI", () => {
   });
 });
 
+describe("parseReferenceLimits", () => {
+  it("lee los intervalos tal como los aprueba el catálogo", () => {
+    expect(parseReferenceLimits("70 - 100")).toEqual({ low: 70, high: 100 });
+    expect(parseReferenceLimits("0.5 - 1.1")).toEqual({ low: 0.5, high: 1.1 });
+    expect(parseReferenceLimits("1.005 - 1.030")).toEqual({ low: 1.005, high: 1.03 });
+    expect(parseReferenceLimits("4,500 - 11,000 /µL")).toEqual({ low: 4500, high: 11000 });
+    expect(parseReferenceLimits("150,000 - 400,000 /µL")).toEqual({ low: 150000, high: 400000 });
+    expect(parseReferenceLimits("36% - 53%")).toEqual({ low: 36, high: 53 });
+    expect(parseReferenceLimits("4.0 - 5.9 millones/µL")).toEqual({ low: 4, high: 5.9 });
+  });
+
+  it("lee los intervalos abiertos", () => {
+    expect(parseReferenceLimits("< 200")).toEqual({ high: 200 });
+    expect(parseReferenceLimits("Menos de 200 mg/dL")).toEqual({ high: 200 });
+    expect(parseReferenceLimits("Mayor de 40 mg/dL")).toEqual({ low: 40 });
+  });
+
+  it("no adivina cuando la etiqueta no define cifras", () => {
+    expect(parseReferenceLimits("Pendiente de validar (mg/dL)")).toEqual({});
+    expect(parseReferenceLimits("Segun metodo")).toEqual({});
+    expect(parseReferenceLimits("")).toEqual({});
+  });
+
+  it("deja sin marcar los intervalos por sexo en vez de usar el equivocado", () => {
+    expect(parseReferenceLimits("Hombres: 3.5 - 7.2\nMujeres: 2.6 - 6.0")).toEqual({});
+  });
+
+  it("no confunde las cifras de la unidad con el intervalo", () => {
+    expect(parseReferenceLimits("0 - 20 mm/1ra hora")).toEqual({ low: 0, high: 20 });
+  });
+
+  it("marca fuera de rango con lo que el catálogo aprueba hoy: solo la etiqueta", () => {
+    const limits = numericLimits([{ label: "70 - 100" }], {});
+    expect(limits).toEqual({ low: 70, high: 100, criticalLow: undefined, criticalHigh: undefined });
+    expect(flagNumericResult(250, limits)).toBe("high");
+    expect(flagNumericResult(40, limits)).toBe("low");
+    expect(flagNumericResult(85, limits)).toBe("normal");
+  });
+
+  it("respeta las cifras explícitas por encima de la etiqueta", () => {
+    expect(numericLimits([{ label: "70 - 100", low: 65, high: 105 }], {}))
+      .toMatchObject({ low: 65, high: 105 });
+  });
+});
+
+describe("resultFlagFor", () => {
+  // Tal como llegan desde la réplica offline: sin low/high, solo la etiqueta.
+  const fila = (value: string, reference: string, flag: ResultValue["flag"] = "normal") =>
+    ({ resultType: "numeric" as const, value, reference, flag });
+
+  it("marca fuera de rango aunque el resultado llegue sin cifras cargadas", () => {
+    expect(resultFlagFor(fila("6.22", "4.0 - 5.9 millones/µL"))).toBe("high");
+    expect(resultFlagFor(fila("18.67", "12.0 - 17.5"))).toBe("high");
+    expect(resultFlagFor(fila("56", "36 - 53"))).toBe("high");
+    expect(resultFlagFor(fila("30", "36 - 53"))).toBe("low");
+    expect(resultFlagFor(fila("45", "36 - 53"))).toBe("normal");
+  });
+
+  it("prefiere las cifras del catálogo cuando sí vienen cargadas", () => {
+    expect(resultFlagFor({ ...fila("56", "36 - 53"), low: 20, high: 80 })).toBe("normal");
+  });
+
+  it("respeta un aviso ya emitido por la base", () => {
+    expect(resultFlagFor(fila("45", "36 - 53", "critical"))).toBe("critical");
+    expect(resultFlagFor(fila("45", "36 - 53", "unreviewed"))).toBe("unreviewed");
+  });
+
+  it("no marca lo vacío, lo no numérico ni lo que no tiene intervalo", () => {
+    expect(resultFlagFor(fila("", "36 - 53"))).toBe("normal");
+    expect(resultFlagFor(fila("9999", "Pendiente de validar"))).toBe("normal");
+    expect(resultFlagFor({ resultType: "qualitative", value: "Positivo", reference: "", flag: "normal" })).toBe("normal");
+  });
+});
+
+describe("resultNumericLimits", () => {
+  const version = {
+    reference_ranges: [{ low: 4500, high: 11000, label: "4,500 - 11,000" }],
+    critical_limits: { low: 2000, high: 30000 },
+  };
+
+  it("toma los intervalos de la versión vigente cuando no hay snapshot", () => {
+    expect(resultNumericLimits({}, version)).toEqual({
+      low: 4500, high: 11000, criticalLow: 2000, criticalHigh: 30000,
+    });
+  });
+
+  it("prefiere el snapshot del resultado sobre el catálogo actual", () => {
+    expect(resultNumericLimits({
+      reference_range: { low: 4000, high: 10000 },
+      critical_limits: { low: 1500, high: 25000 },
+    }, version)).toEqual({ low: 4000, high: 10000, criticalLow: 1500, criticalHigh: 25000 });
+  });
+
+  it("deja los límites vacíos cuando el catálogo aún no los define", () => {
+    expect(resultNumericLimits({}, undefined)).toEqual({
+      low: undefined, high: undefined, criticalLow: undefined, criticalHigh: undefined,
+    });
+  });
+
+  it("permite marcar fuera de rango un resultado cargado del servidor", () => {
+    const limits = resultNumericLimits({}, version);
+    expect(flagNumericResult(12000, limits)).toBe("high");
+    expect(flagNumericResult(3000, limits)).toBe("low");
+    expect(flagNumericResult(31000, limits)).toBe("critical");
+    expect(flagNumericResult(7000, limits)).toBe("normal");
+  });
+});
+
 describe("linkedHematologyValues", () => {
   it("completa hematocrito y hematíes desde hemoglobina", () => {
     expect(linkedHematologyValues("HEM-HB", "12.6")).toEqual({
-      "HEM-RBC": "4.2", "HEM-HB": "12.6", "HEM-HCT": "37.8",
+      "HEM-RBC": "4.03", "HEM-HB": "12.6", "HEM-HCT": "37.93",
     });
   });
 
   it("completa hemoglobina y hematíes desde hematocrito", () => {
     expect(linkedHematologyValues("HEM-HCT", "36")).toEqual({
-      "HEM-RBC": "4", "HEM-HB": "12", "HEM-HCT": "36",
+      "HEM-RBC": "3.83", "HEM-HB": "11.96", "HEM-HCT": "36",
     });
   });
 
   it("completa hemoglobina y hematocrito desde hematíes", () => {
     expect(linkedHematologyValues("HEM-RBC", "4.5")).toEqual({
-      "HEM-RBC": "4.5", "HEM-HB": "13.5", "HEM-HCT": "40.5",
+      "HEM-RBC": "4.5", "HEM-HB": "14.06", "HEM-HCT": "42.33",
     });
+  });
+
+  it("vacía las tres al borrar el valor de origen", () => {
+    expect(linkedHematologyValues("HEM-HCT", "")).toEqual({
+      "HEM-RBC": "", "HEM-HB": "", "HEM-HCT": "",
+    });
+    expect(linkedHematologyValues("HEM-HB", "   ")).toEqual({
+      "HEM-RBC": "", "HEM-HB": "", "HEM-HCT": "",
+    });
+  });
+
+  it("no toca análisis ajenos a la fórmula", () => {
+    expect(linkedHematologyValues("HEM-WBC", "")).toBeNull();
   });
 
   it("identifica los resultados bloqueados por código o nombre", () => {
@@ -129,6 +238,23 @@ describe("linkedBiochemistryValues", () => {
     })).toEqual({ "BIO-HDL": "31.62", "BIO-VLDL": "70.4", "BIO-LDL": "83.98" });
   });
 
+  it("calcula LDL alternativo cuando no hay trigliceridos", () => {
+    expect(linkedBiochemistryValues("BIO-CHOL", "186", {})).toEqual({
+      "BIO-HDL": "31.62", "BIO-VLDL": "", "BIO-LDL": "124.62",
+    });
+  });
+
+  it("identifica los campos calculados que deben estar bloqueados", () => {
+    expect(isCalculatedAnalysisResult("HEM-RBC", "", "Hematologia")).toBe(true);
+    expect(isCalculatedAnalysisResult("HEM-HB", "", "Hematologia")).toBe(true);
+    expect(isCalculatedAnalysisResult("BIO-HDL", "", "Bioquimica")).toBe(true);
+    expect(isCalculatedAnalysisResult("BIO-LDL", "", "Bioquimica")).toBe(true);
+    expect(isCalculatedAnalysisResult("BIO-VLDL", "", "Bioquimica")).toBe(true);
+    expect(isCalculatedAnalysisResult("CUS-INDIRECTA", "B. Indirecta", "Bioquimica")).toBe(true);
+    expect(isCalculatedAnalysisResult("BIO-GLOB", "Globulinas", "Bioquimica")).toBe(true);
+    expect(isCalculatedAnalysisResult("BIO-CHOL", "", "Bioquimica")).toBe(false);
+  });
+
   it("calcula bilirrubina indirecta", () => {
     expect(linkedBiochemistryValues("BIO-BD", "0.32", { "BIO-BT": "1.25" }))
       .toEqual({ "BIO-BI": "0.93" });
@@ -141,6 +267,8 @@ describe("linkedBiochemistryValues", () => {
 
   it("reconoce variantes por nombre del catálogo", () => {
     expect(biochemistryFormulaKey("COD-LOCAL", "Bilirrubina indirecta", "Bioquímica")).toBe("BIO-BI");
+    expect(biochemistryFormulaKey("COD-LOCAL", "B. Indirecta", "Bioquímica")).toBe("BIO-BI");
+    expect(biochemistryFormulaKey("COD-LOCAL", "Proteínas", "Bioquímica")).toBe("BIO-PROT");
     expect(biochemistryFormulaKey("COD-LOCAL", "Proteínas totales", "Bioquímica")).toBe("BIO-PROT");
   });
 });

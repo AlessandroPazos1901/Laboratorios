@@ -96,7 +96,7 @@ export function materializePatient(data: LabData, patient: Patient) {
   return withSummary({ ...data, patients, orders });
 }
 
-function sameClinicalDay(left: string, right: string) {
+export function sameClinicalDay(left: string, right: string) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Lima", year: "numeric", month: "2-digit", day: "2-digit",
   });

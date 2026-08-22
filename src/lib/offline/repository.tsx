@@ -13,6 +13,7 @@ import {
   discardPatientRosterImport,
   getPatientRosterMetadata,
   listOfflineOperations,
+  rewrapOfflineVault,
   searchPatientRoster,
   writePatientRosterBatch,
   type UnlockedVault,
@@ -24,6 +25,8 @@ import {
   materializeResultChanges,
   type LocalRegistrationEntry,
 } from "@/lib/offline/materialize";
+import { materializeCatalog } from "@/lib/offline/materialize-catalog";
+import { catalogFriendlyError, type CatalogOperation } from "@/lib/catalog-operations";
 import type { OfflineOperation, OfflineVaultSnapshot } from "@/lib/offline/types";
 import type {
   PatientRosterImportResult,
@@ -57,7 +60,8 @@ export type OfflineRepository = {
     entries: LocalRegistrationEntry[];
   }): Promise<string>;
   saveResults(order: LabOrder, results: ResultValue[]): Promise<{ lockVersion: number; results: ResultValue[] }>;
-  buildOfflineReport(order: LabOrder, batchId: string, includedResultIds: string[]): Promise<Blob | null>;
+  saveCatalog(operation: CatalogOperation): Promise<void>;
+  buildOfflineReport(order: LabOrder, batchId: string, includedResultIds: string[], title?: string): Promise<Blob | null>;
   previewPatientRoster(file: File): Promise<PatientRosterPreview>;
   importPatientRoster(input: {
     file: File;
@@ -67,6 +71,8 @@ export type OfflineRepository = {
   }): Promise<PatientRosterImportResult>;
   getPatientRosterMetadata(): Promise<PatientRosterMetadata | null>;
   searchPatients(query: string, limit?: number): Promise<Patient[]>;
+  /** Tras cambiar la contraseña de la cuenta, para que siga abriendo esta bóveda. */
+  rewrapVault(password: string): Promise<void>;
   refresh(): Promise<void>;
   requestSync(): void;
 };
@@ -114,11 +120,34 @@ export function OfflineRepositoryProvider(props: {
     if (syncAfterCommit) props.requestSync();
   };
 
+  /**
+   * Con internet se escribe directo contra la base: es lo que hace que cinco
+   * personas trabajando a la vez vean el trabajo de las demás en vez de cinco
+   * copias divergentes.
+   *
+   * La cola vacía es condición obligatoria, no una optimización. Saltarse
+   * operaciones que aún no subieron reordena las escrituras: guardar resultados
+   * contra una orden que en el servidor todavía no existe, o pisar un cambio de
+   * catálogo con otro anterior. Mientras quede algo pendiente, todo sigue por la
+   * cola y en su orden.
+   */
+  const requireSession = () => {
+    if (!props.session) throw new Error("offline_vault_locked");
+    return props.session;
+  };
+
+  const writeThrough = async () => {
+    if (!props.session) return true;
+    if (!props.online) return false;
+    const queued = await listOfflineOperations(props.session, ["pending", "syncing", "blocked"]);
+    return queued.length === 0;
+  };
+
   const repository: OfflineRepository = {
     enabled: Boolean(props.session),
     online: props.online,
     async savePatient(input) {
-      if (!props.session) {
+      if (await writeThrough()) {
         const response = input.birthDate && input.sex
           ? await createClient().rpc("upsert_patient_with_demographics", {
               patient_dni: input.documentNumber,
@@ -145,7 +174,7 @@ export function OfflineRepositoryProvider(props: {
       const patientId = patientIdFromDni(input.documentNumber);
       if (patientId === null) throw new Error("invalid_dni");
       const existing = props.data.patients.find((patient) => patient.id === patientId);
-      const operation = operationBase(props.session, props.currentUser, "patient.upsert");
+      const operation = operationBase(requireSession(), props.currentUser, "patient.upsert");
       const patient: Patient = {
         id: patientId,
         documentNumber: input.documentNumber,
@@ -166,7 +195,7 @@ export function OfflineRepositoryProvider(props: {
       return patient;
     },
     async updatePatient(input) {
-      if (!props.session) {
+      if (await writeThrough()) {
         const response = await createClient().rpc("update_patient_details", {
           target_patient: input.patient.id,
           patient_name: input.fullName,
@@ -177,7 +206,7 @@ export function OfflineRepositoryProvider(props: {
         await props.refresh();
         return { ...input.patient, fullName: input.fullName, birthDate: input.birthDate, sex: input.sex };
       }
-      const operation = operationBase(props.session, props.currentUser, "patient.update");
+      const operation = operationBase(requireSession(), props.currentUser, "patient.update");
       operation.baseVersion = input.patient.syncVersion ?? 1;
       operation.payload = {
         patientId: input.patient.id,
@@ -193,13 +222,13 @@ export function OfflineRepositoryProvider(props: {
         syncState: "pending",
         clientMutationId: operation.clientMutationId,
       };
-      await commit(materializePatient(props.data, patient), operation);
+      await commit(materializePatient(props.data, patient), operation, true);
       return patient;
     },
     async registerAnalyses(input) {
       const entries = input.entries.filter(({ value }) => value.trim().length > 0);
       if (!entries.length) throw new Error("analyses_required");
-      if (!props.session) {
+      if (await writeThrough()) {
         const response = await createClient().rpc("register_daily_analyses", {
           target_patient: input.patient.id,
           occurred_at: input.occurredAt,
@@ -217,7 +246,7 @@ export function OfflineRepositoryProvider(props: {
         await props.refresh();
         return String((response.data as { order_id?: string } | null)?.order_id ?? "");
       }
-      const operation = operationBase(props.session, props.currentUser, "analysis.register");
+      const operation = operationBase(requireSession(), props.currentUser, "analysis.register");
       if (input.patient.clientMutationId) operation.dependencies = [input.patient.clientMutationId];
       operation.payload = {
         patientId: input.patient.id,
@@ -245,7 +274,10 @@ export function OfflineRepositoryProvider(props: {
       return materialized.order.id;
     },
     async saveResults(order, results) {
-      if (!props.session) {
+      // Sin `revisionId` la orden todavía no existe en el servidor (se creó sin
+      // conexión): aunque haya internet, esta edición tiene que ir por la cola.
+      if (order.revisionId ? await writeThrough() : !props.session) {
+        if (!order.revisionId) throw new Error("missing_revision");
         const originalByAnalysis = new Map(order.results.map((result) => [result.orderAnalysisId, result.value]));
         const entries = results.filter((result) => result.value !== (originalByAnalysis.get(result.orderAnalysisId) ?? "")).map((result) => ({
           order_analysis_id: result.orderAnalysisId,
@@ -268,15 +300,24 @@ export function OfflineRepositoryProvider(props: {
         await props.refresh();
         return { lockVersion: saved.lock_version, results: next };
       }
+      const session = requireSession();
       const nextData = materializeResultChanges(props.data, order.id, results);
-      const queued = await listOfflineOperations(props.session, ["pending", "blocked"]);
+      const queued = await listOfflineOperations(session, ["pending", "blocked"]);
       if (order.clientMutationId) {
         const original = queued.find((item) => item.operation.clientMutationId === order.clientMutationId)?.operation;
         if (!original) throw new Error("offline_registration_missing");
+        // El analista es obligatorio en el servidor: sin conservarlo, reescribir el
+        // registro encolado dejaba la operación bloqueada al reconectar.
+        const previousEntries = Array.isArray(original.payload.resultEntries)
+          ? original.payload.resultEntries as { analysis_version_id?: string; analyst_id?: string }[]
+          : [];
+        const analystByVersion = new Map(previousEntries.map((entry) => [entry.analysis_version_id, entry.analyst_id]));
+        const fallbackAnalyst = previousEntries.find((entry) => entry.analyst_id)?.analyst_id;
         original.payload = {
           ...original.payload,
           resultEntries: results.map((result) => ({
             analysis_version_id: result.analysisVersionId,
+            analyst_id: result.analystId ?? analystByVersion.get(result.analysisVersionId) ?? fallbackAnalyst,
             payload: result.resultType === "numeric"
               ? { numeric_value: Number(result.value) }
               : result.resultType === "qualitative"
@@ -284,7 +325,7 @@ export function OfflineRepositoryProvider(props: {
                 : { text_value: result.value.trim() },
           })),
         };
-        await commit(nextData, original);
+        await commit(nextData, original, true);
         return { lockVersion: order.lockVersion, results };
       }
       const pendingSave = queued.find(({ operation }) =>
@@ -294,7 +335,7 @@ export function OfflineRepositoryProvider(props: {
       // the pending payload instead of creating operations with the same base version.
       const operation = pendingSave
         ? { ...pendingSave.operation, payload: { ...pendingSave.operation.payload } }
-        : operationBase(props.session, props.currentUser, "results.save");
+        : operationBase(session, props.currentUser, "results.save");
       operation.baseVersion = order.lockVersion;
       operation.payload = {
         orderId: order.id,
@@ -307,10 +348,32 @@ export function OfflineRepositoryProvider(props: {
             : { clear: true }),
         })),
       };
-      await commit(nextData, operation);
+      await commit(nextData, operation, true);
       return { lockVersion: order.lockVersion, results };
     },
-    async buildOfflineReport(order, batchId, includedResultIds) {
+    async saveCatalog(operation) {
+      if (await writeThrough()) {
+        const response = await fetch("/api/catalog", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(operation),
+        });
+        const payload = await response.json().catch(() => null) as { error?: string } | null;
+        if (!response.ok) throw new Error(payload?.error ?? catalogFriendlyError("sin_detalle"));
+        await props.refresh();
+        return;
+      }
+      const session = requireSession();
+      const queued = await listOfflineOperations(session, ["pending", "blocked"]);
+      // El orden importa: crear un subgrupo depende de que su grupo ya exista.
+      // `createdAt` puede empatar al milisegundo, así que se encadena explícitamente.
+      const lastCatalog = queued.filter(({ operation: item }) => item.kind === "catalog.apply").at(-1);
+      const queuedOperation = operationBase(session, props.currentUser, "catalog.apply");
+      queuedOperation.dependencies = lastCatalog ? [lastCatalog.operation.clientMutationId] : [];
+      queuedOperation.payload = operation as unknown as Record<string, unknown>;
+      await commit(materializeCatalog(props.data, operation), queuedOperation, true);
+    },
+    async buildOfflineReport(order, batchId, includedResultIds, title) {
       if (!props.session) return null;
       const included = new Set(includedResultIds);
       const results = order.results.filter((result) => result.batchId === batchId && included.has(result.orderAnalysisId));
@@ -327,6 +390,7 @@ export function OfflineRepositoryProvider(props: {
         age: formatPatientAgeAt(order.patientBirthDate, order.createdAt),
         revision: order.revisionNumber ?? 1,
         printedAt: new Date().toISOString(),
+        title,
         results: results.map((result) => ({
           group: result.group,
           analysisCode: result.analysisCode,
@@ -341,11 +405,11 @@ export function OfflineRepositoryProvider(props: {
       return new Blob([bytes as BlobPart], { type: "application/pdf" });
     },
     async previewPatientRoster(file) {
-      if (!props.session) throw new Error("Primero prepara este equipo para trabajar sin internet y luego ingresa tu PIN.");
+      if (!props.session) throw new Error("Este equipo aún no tiene su copia local. Conéctalo a internet e inicia sesión una vez.");
       return previewPatientRosterFile(file);
     },
     async importPatientRoster(input) {
-      if (!props.session) throw new Error("Primero prepara este equipo para trabajar sin internet y luego ingresa tu PIN.");
+      if (!props.session) throw new Error("Este equipo aún no tiene su copia local. Conéctalo a internet e inicia sesión una vez.");
       const rosterId = crypto.randomUUID();
       try {
         await beginPatientRosterImport(props.session, rosterId);
@@ -389,6 +453,9 @@ export function OfflineRepositoryProvider(props: {
     async searchPatients(query, limit = 8) {
       if (!props.session) return [];
       return searchPatientRoster(props.session, query, limit);
+    },
+    async rewrapVault(password) {
+      if (props.session) props.setSession(await rewrapOfflineVault(props.session, password));
     },
     refresh: props.refresh,
     requestSync: props.requestSync,

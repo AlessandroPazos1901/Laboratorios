@@ -2,7 +2,7 @@ import { deleteDB, openDB, unwrap, type DBSchema, type IDBPDatabase } from "idb"
 import {
   createDataKey,
   decryptJson,
-  derivePinKey,
+  deriveVaultKey,
   encryptJson,
   randomBase64,
   unwrapDataKey,
@@ -178,7 +178,7 @@ export async function getActiveVaultMeta() {
 }
 
 export async function createOfflineVault(input: {
-  pin: string;
+  password: string;
   lease: OfflineLease;
   snapshot: OfflineVaultSnapshot;
   cursor: number;
@@ -186,9 +186,9 @@ export async function createOfflineVault(input: {
   await verifyOfflineLease(input.lease.token, input.lease.deviceId);
   const id = `${input.lease.userId}:${input.lease.deviceId}`;
   const salt = randomBase64(16);
-  const pinKey = await derivePinKey(input.pin, salt);
+  const wrappingKey = await deriveVaultKey(input.password, salt);
   const dataKey = await createDataKey();
-  const wrappedKey = await wrapDataKey(dataKey, pinKey);
+  const wrappedKey = await wrapDataKey(dataKey, wrappingKey);
   const encrypted = await encryptJson(dataKey, input.snapshot);
   const now = new Date().toISOString();
   const meta: OfflineVaultMeta = {
@@ -215,7 +215,7 @@ export async function createOfflineVault(input: {
   return { meta, key: dataKey, snapshot: input.snapshot } satisfies UnlockedVault;
 }
 
-export async function unlockOfflineVault(pin: string, allowExpired = false): Promise<UnlockedVault> {
+export async function unlockOfflineVault(password: string, allowExpired = false): Promise<UnlockedVault> {
   const meta = await getActiveVaultMeta();
   if (!meta) throw new Error("offline_vault_missing");
   const claims = await verifyOfflineLease(meta.lease.token, meta.deviceId);
@@ -223,12 +223,12 @@ export async function unlockOfflineVault(pin: string, allowExpired = false): Pro
   if (!allowExpired && new Date(meta.lease.expiresAt).getTime() <= Date.now()) {
     throw new Error("offline_lease_expired");
   }
-  const pinKey = await derivePinKey(pin, meta.salt);
+  const wrappingKey = await deriveVaultKey(password, meta.salt);
   let key: CryptoKey;
   try {
-    key = await unwrapDataKey(meta.wrappedKey, pinKey);
+    key = await unwrapDataKey(meta.wrappedKey, wrappingKey);
   } catch {
-    throw new Error("offline_pin_incorrect");
+    throw new Error("offline_password_incorrect");
   }
   const encrypted = await (await database()).get("records", recordId(meta.id));
   if (!encrypted) throw new Error("offline_snapshot_missing");
@@ -236,8 +236,21 @@ export async function unlockOfflineVault(pin: string, allowExpired = false): Pro
     const snapshot = await decryptJson<OfflineVaultSnapshot>(key, encrypted);
     return { meta, key, snapshot };
   } catch {
-    throw new Error("offline_pin_incorrect");
+    throw new Error("offline_password_incorrect");
   }
+}
+
+/**
+ * La contraseña cambió estando conectado: se vuelve a envolver la misma clave de
+ * datos con la nueva. No hay que descifrar ni reescribir el snapshot, solo el
+ * sobre. Sin esto, cambiar la contraseña dejaría el equipo sin poder abrirse.
+ */
+export async function rewrapOfflineVault(session: UnlockedVault, password: string) {
+  const salt = randomBase64(16);
+  const wrappedKey = await wrapDataKey(session.key, await deriveVaultKey(password, salt));
+  const meta = { ...session.meta, salt, wrappedKey, updatedAt: new Date().toISOString() };
+  await (await database()).put("vaults", meta);
+  return { ...session, meta } satisfies UnlockedVault;
 }
 
 export async function saveOfflineSnapshot(session: UnlockedVault, snapshot: OfflineVaultSnapshot, cursor: number) {
@@ -322,6 +335,17 @@ export async function listOfflineOperations(session: UnlockedVault, statuses?: O
     error: record.error,
   })));
   return orderOperationsByDependencies(values);
+}
+
+/**
+ * Cuántos cambios quedan sin enviar, sin abrir la bóveda. El `outbox` guarda el
+ * estado en claro y solo cifra el contenido, así que esto funciona incluso
+ * cuando la contraseña ya no descifra la copia local — que es justo cuando hace
+ * falta saber qué se perdería al rehacerla.
+ */
+export async function countUnsentOperations(vaultId: string) {
+  const records = await (await database()).getAllFromIndex("outbox", "by-vault", vaultId);
+  return records.filter((record) => record.status !== "applied").length;
 }
 
 export async function setOfflineOperationStatus(

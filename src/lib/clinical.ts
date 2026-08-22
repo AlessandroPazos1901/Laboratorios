@@ -85,32 +85,116 @@ export function flagNumericResult(
   return "normal";
 }
 
-const isMillonesUnit = (unit: string) => /mill/i.test(unit);
-const thousandResultCodes = new Set(["HEM-WBC", "HEM-PLT"]);
+const REFERENCE_NUMBER = String.raw`\d[\d.,]*`;
 
-export function formatNumericResult(rawValue: string, unit = "", analysisCode = "") {
+function referenceNumber(token: string) {
+  // Coma de miles, punto decimal: "4,500" es 4500 y "1.030" es 1.03.
+  const value = Number(token.replace(/,/g, ""));
+  return Number.isFinite(value) ? value : undefined;
+}
+
+// El catálogo aprueba el intervalo como etiqueta ("70 - 100", "< 200") y no como
+// cifras, así que se derivan de ahí para poder marcar fuera de rango. Lo ambiguo
+// —rangos por sexo, "Pendiente de validar"— se deja sin marcar antes que adivinar.
+export function parseReferenceLimits(label: string): { low?: number; high?: number } {
+  const text = label.trim();
+  if (!text || text.includes("\n")) return {};
+  // El "%" se pega al número ("36% - 53%"), así que se admite antes del separador.
+  const between = text.match(new RegExp(`(${REFERENCE_NUMBER})\\s*%?\\s*(?:[-–—]|\\sa\\s)\\s*(${REFERENCE_NUMBER})`, "i"));
+  if (between) return { low: referenceNumber(between[1]), high: referenceNumber(between[2]) };
+  const below = text.match(new RegExp(`(?:<|menos de|hasta|inferior a)\\s*(${REFERENCE_NUMBER})`, "i"));
+  if (below) return { high: referenceNumber(below[1]) };
+  const above = text.match(new RegExp(`(?:>|mayor(?:es)? (?:a|de)|superior a)\\s*(${REFERENCE_NUMBER})`, "i"));
+  if (above) return { low: referenceNumber(above[1]) };
+  return {};
+}
+
+// Se evalúa contra la etiqueta del propio resultado, no contra lo que traiga
+// cargado río arriba: la réplica offline puede haberse guardado sin cifras.
+export function resultFlagFor(result: {
+  resultType: "numeric" | "qualitative" | "text";
+  value: string;
+  reference?: string;
+  flag: ResultFlag;
+  low?: number;
+  high?: number;
+  criticalLow?: number;
+  criticalHigh?: number;
+}): ResultFlag {
+  if (result.flag === "unreviewed" || result.resultType !== "numeric") return result.flag;
+  const value = Number(result.value);
+  if (!result.value.trim() || !Number.isFinite(value)) return "normal";
+  if (result.flag !== "normal") return result.flag;
+  const limits = result.low !== undefined || result.high !== undefined
+    ? result
+    : { ...parseReferenceLimits(result.reference ?? ""), criticalLow: result.criticalLow, criticalHigh: result.criticalHigh };
+  return flagNumericResult(value, limits);
+}
+
+/**
+ * Texto de referencia que se imprime. Vive aquí, junto a `numericLimits`, porque
+ * lo usan tanto la carga desde Supabase como la réplica offline, y esta última
+ * corre en el navegador: no puede importar nada marcado `server-only`.
+ */
+export function referenceLabel(ranges: unknown) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return "Por definir";
+  const range = ranges[0] as Record<string, unknown>;
+  if (typeof range.label === "string") return range.label;
+  if (range.low !== undefined && range.high !== undefined) return `${range.low} – ${range.high}`;
+  return "Según edad y sexo";
+}
+
+export function numericLimits(ranges: unknown, criticalLimits: unknown) {
+  const range = Array.isArray(ranges) && ranges.length ? ranges[0] as Record<string, unknown> : {};
+  const critical = criticalLimits && typeof criticalLimits === "object" ? criticalLimits as Record<string, unknown> : {};
+  const numberOrUndefined = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  const low = numberOrUndefined(range.low);
+  const high = numberOrUndefined(range.high);
+  const derived = low === undefined && high === undefined && typeof range.label === "string"
+    ? parseReferenceLimits(range.label)
+    : {};
+  return {
+    low: low ?? derived.low,
+    high: high ?? derived.high,
+    criticalLow: numberOrUndefined(critical.low),
+    criticalHigh: numberOrUndefined(critical.high),
+  };
+}
+
+// Los límites viajan con cada resultado para poder marcar fuera de rango al editarlo.
+// Manda el snapshot: un resultado ya emitido se interpreta con los intervalos
+// vigentes cuando se tomó la muestra, no con los del catálogo de hoy.
+export function resultNumericLimits(
+  snapshot: Record<string, unknown>,
+  version?: { reference_ranges: unknown; critical_limits: unknown },
+) {
+  const snapshotRange = snapshot.reference_range as Record<string, unknown> | null | undefined;
+  return numericLimits(
+    snapshotRange ? [snapshotRange] : version?.reference_ranges,
+    snapshot.critical_limits ?? version?.critical_limits,
+  );
+}
+
+export const isMillonesUnit = (unit: string) => /mill/i.test(unit);
+
+// La cifra guardada de un análisis en millones (hematíes) viene en millones;
+// al mostrarla se expande a su valor absoluto con separadores de miles.
+export function millonesFactor(unit: string) {
+  return isMillonesUnit(unit) ? 1_000_000 : 1;
+}
+
+export function formatNumericResult(rawValue: string, unit = "") {
   const trimmed = rawValue.trim();
   const number = Number(trimmed);
   if (!trimmed || !Number.isFinite(number)) return rawValue;
-  if (thousandResultCodes.has(analysisCode.toUpperCase())) {
-    return Number((number / 1_000).toFixed(8)).toLocaleString("es-PE", { maximumFractionDigits: 8 });
-  }
   if (isMillonesUnit(unit)) {
-    return number.toLocaleString("es-PE", { maximumFractionDigits: 8 });
+    return (number * 1_000_000).toLocaleString("es-PE", { maximumFractionDigits: 0 });
   }
   const decimals = trimmed.includes(".") ? trimmed.split(".")[1].length : 0;
   return number.toLocaleString("es-PE", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
-// Conservado para datos históricos y lugares que todavía requieren la cifra absoluta.
-export function expandMillonesText(text: string) {
-  if (!isMillonesUnit(text)) return text;
-  return text
-    .replace(/\d+(?:[.,]\d+)?/g, (match) => (Number(match.replace(",", ".")) * 1_000_000).toLocaleString("es-PE"))
-    .replace(/millones\s*/gi, "")
-    .trim();
-}
-
+// Notación abreviada, solo para la captura donde el analista teclea la cifra corta.
 export function formatReferenceRange(text: string) {
   return text.replace(/\bmill(?:ón|ones)\b/gi, "10^6");
 }
@@ -124,22 +208,29 @@ export function isValidDni(value: string) {
 }
 
 const linkedHematologyCodes = new Set(["HEM-RBC", "HEM-HB", "HEM-HCT"]);
+const HEMATOCRIT_TO_HEMOGLOBIN = 3.01;
+const HEMOGLOBIN_TO_ERYTHROCYTES_THOUSANDS = 320;
+const THOUSANDS_PER_MILLION = 1_000;
 
 function conciseDecimal(value: number) {
   return Number(value.toFixed(2)).toString();
 }
 
 export function linkedHematologyValues(sourceCode: string, rawValue: string) {
-  if (!linkedHematologyCodes.has(sourceCode) || !rawValue.trim()) return null;
+  if (!linkedHematologyCodes.has(sourceCode)) return null;
+  // Borrar el origen vacía la tanda: dejar las otras dos con la cifra anterior
+  // mostraría un hemograma que nadie midió.
+  if (!rawValue.trim()) return { "HEM-RBC": "", "HEM-HB": "", "HEM-HCT": "" };
   const source = Number(rawValue);
   if (!Number.isFinite(source)) return null;
   const hemoglobin = sourceCode === "HEM-HB" ? source
-    : sourceCode === "HEM-HCT" ? source / 3
-      : source * 3;
+    : sourceCode === "HEM-HCT" ? source / HEMATOCRIT_TO_HEMOGLOBIN
+      : source * THOUSANDS_PER_MILLION / HEMOGLOBIN_TO_ERYTHROCYTES_THOUSANDS;
   return {
-    "HEM-RBC": conciseDecimal(hemoglobin / 3),
+    // La hoja calcula Hb x 320 en miles/µL; el catálogo guarda hematíes en millones/µL.
+    "HEM-RBC": conciseDecimal(hemoglobin * HEMOGLOBIN_TO_ERYTHROCYTES_THOUSANDS / THOUSANDS_PER_MILLION),
     "HEM-HB": conciseDecimal(hemoglobin),
-    "HEM-HCT": conciseDecimal(hemoglobin * 3),
+    "HEM-HCT": conciseDecimal(hemoglobin * HEMATOCRIT_TO_HEMOGLOBIN),
   };
 }
 
@@ -179,13 +270,27 @@ export function biochemistryFormulaKey(code: string, name = "", group = ""): Bio
   if (label.includes("LDL")) return "BIO-LDL";
   if (label.includes("TRIGLICER")) return "BIO-TG";
   if (label.includes("COLESTEROL") && label.includes("TOTAL")) return "BIO-CHOL";
-  if (label.includes("BILIRRUBINA") && label.includes("INDIRECT")) return "BIO-BI";
-  if (label.includes("BILIRRUBINA") && label.includes("DIRECT")) return "BIO-BD";
+  if ((label.includes("BILIRRUBINA") && label.includes("INDIRECT")) || label === "B INDIRECTA") return "BIO-BI";
+  if ((label.includes("BILIRRUBINA") && label.includes("DIRECT")) || label === "B DIRECTA") return "BIO-BD";
   if ((label.includes("BILIRRUBINA") && label.includes("TOTAL")) || label === "B TOTAL") return "BIO-BT";
-  if (label.includes("PROTEINA") && label.includes("TOTAL")) return "BIO-PROT";
+  if (label.includes("PROTEINA") && !label.includes("GLOBULINA")) return "BIO-PROT";
   if (label.includes("ALBUMINA")) return "BIO-ALB";
   if (label.includes("GLOBULINA")) return "BIO-GLOB";
   return null;
+}
+
+const calculatedBiochemistryCodes = new Set<BiochemistryFormulaKey>([
+  "BIO-HDL", "BIO-LDL", "BIO-VLDL", "BIO-BI", "BIO-GLOB",
+]);
+
+export function isCalculatedBiochemistryResult(code: string, name = "", group = "") {
+  const key = biochemistryFormulaKey(code, name, group);
+  return key !== null && calculatedBiochemistryCodes.has(key);
+}
+
+export function isCalculatedAnalysisResult(code: string, name = "", group = "") {
+  return isCalculatedHematologyResult(code, name, group)
+    || isCalculatedBiochemistryResult(code, name, group);
 }
 
 function numericFormulaValue(value: string | undefined) {
@@ -215,7 +320,13 @@ export function linkedBiochemistryValues(
     }
     const hdl = numericFormulaValue(values["BIO-HDL"]);
     const vldl = numericFormulaValue(values["BIO-VLDL"]);
-    setValue("BIO-LDL", cholesterol !== null && hdl !== null && vldl !== null ? cholesterol - vldl - hdl : null);
+    setValue("BIO-LDL", cholesterol === null
+      ? null
+      : vldl === null
+        ? cholesterol * 0.67
+        : hdl === null
+          ? null
+          : cholesterol - vldl - hdl);
   }
 
   if (sourceKey === "BIO-BT" || sourceKey === "BIO-BD") {

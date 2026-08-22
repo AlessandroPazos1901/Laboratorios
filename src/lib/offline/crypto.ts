@@ -2,9 +2,10 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const searchKeys = new WeakMap<CryptoKey, Promise<CryptoKey>>();
 
-// New enrollments use four digits. Keep accepting the former 8+ digit format
-// so an already-enrolled computer can still decrypt its existing vault.
-export const PIN_PATTERN = /^(?:\d{4}|\d{8,})$/;
+// La bóveda local se abre con la misma contraseña que la cuenta: un solo
+// credencial en lugar de contraseña online + PIN offline. El largo mínimo solo
+// evita derivar de una cadena vacía; la validación real la hace Supabase.
+export const VAULT_SECRET_MIN_LENGTH = 4;
 export const PBKDF2_ITERATIONS = 600_000;
 
 export type EncryptedValue = { ciphertext: string; iv: string };
@@ -24,11 +25,11 @@ export function randomBase64(length = 16) {
   return toBase64(crypto.getRandomValues(new Uint8Array(length)));
 }
 
-export async function derivePinKey(pin: string, saltBase64: string) {
-  if (!PIN_PATTERN.test(pin)) throw new Error("invalid_pin");
+export async function deriveVaultKey(secret: string, saltBase64: string) {
+  if (secret.length < VAULT_SECRET_MIN_LENGTH) throw new Error("invalid_vault_secret");
   const material = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(pin),
+    encoder.encode(secret),
     "PBKDF2",
     false,
     ["deriveKey"],
@@ -69,13 +70,13 @@ export async function decryptJson<T>(key: CryptoKey, value: EncryptedValue): Pro
   return JSON.parse(decoder.decode(await decryptBytes(key, value))) as T;
 }
 
-export async function wrapDataKey(dataKey: CryptoKey, pinKey: CryptoKey) {
+export async function wrapDataKey(dataKey: CryptoKey, wrappingKey: CryptoKey) {
   const raw = new Uint8Array(await crypto.subtle.exportKey("raw", dataKey));
-  return encryptBytes(pinKey, raw);
+  return encryptBytes(wrappingKey, raw);
 }
 
-export async function unwrapDataKey(value: EncryptedValue, pinKey: CryptoKey) {
-  const raw = await decryptBytes(pinKey, value);
+export async function unwrapDataKey(value: EncryptedValue, wrappingKey: CryptoKey) {
+  const raw = await decryptBytes(wrappingKey, value);
   return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
 }
 

@@ -6,7 +6,7 @@ const operationSchema = z.object({
   clientMutationId: z.string().uuid(),
   deviceId: z.string().uuid(),
   actorId: z.string().uuid(),
-  kind: z.enum(["patient.upsert", "patient.update", "analysis.register", "results.save"]),
+  kind: z.enum(["patient.upsert", "patient.update", "analysis.register", "results.save", "catalog.apply"]),
   createdAt: z.string().datetime(),
   dependencies: z.array(z.string().uuid()).max(20),
   baseVersion: z.number().int().positive().optional(),

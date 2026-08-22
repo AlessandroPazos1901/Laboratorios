@@ -79,6 +79,30 @@ Ejecutar en orden:
     de referencia y obliga a que las selecciones nuevas conserven ese orden.
 12. `202608040004_hematology_formula_precision.sql`: admite centésimas en
     hematíes, hemoglobina y hematocrito para guardar los valores autocalculados.
+13. `202608200001_fix_save_catalog_analysis_ambiguous_analysis_id.sql`: renombra
+    la variable `analysis_id` de `save_catalog_analysis`, que colisionaba con la
+    columna homónima de `analysis_versions` y hacía fallar toda edición de
+    análisis desde el Catálogo con `column reference "analysis_id" is ambiguous`.
+    Crear análisis no se veía afectado: la colisión solo está en la rama de
+    edición. Aplicada el 2026-08-20.
+14. `202608200002_offline_catalog_operations.sql`: permite editar el catálogo sin
+    internet. `create_catalog_group`, `create_catalog_subsection` y
+    `save_catalog_analysis` aceptan un id generado por el equipo (y el código del
+    análisis pasa a derivarse de ese id, para que no cambie al sincronizar);
+    `apply_catalog_operation` centraliza el reparto de las doce acciones del
+    catálogo, y `apply_offline_operation` acepta la operación `catalog.apply`.
+    Archivar o borrar algo ya archivado o borrado devuelve `noop` en vez de fallar.
+    **Ojo**: las tres primeras se recrean con `drop function` previo porque cambia
+    su firma; cualquier código que las llame debe usar argumentos con nombre.
+    Aplicada el 2026-08-20.
+15. `202608210001_login_username.sql`: el personal ingresa con un nombre de
+    usuario en lugar del correo. Agrega `lab_settings.login_username` (único,
+    sembrado con la parte local del correo de la cuenta autorizada) y la función
+    `email_for_login(text)`, `security definer`, que lo traduce al correo. Es
+    ejecutable por `anon` porque la pantalla de ingreso todavía no tiene sesión;
+    solo responde ante una coincidencia exacta y existe una sola cuenta. Para
+    cambiar el usuario: `update public.lab_settings set login_username = '…';`.
+    Aplicada el 2026-08-21.
 
 Las RPC del flujo principal incluyen `search_patients`,
 `upsert_simple_patient`, `upsert_patient_with_demographics`,

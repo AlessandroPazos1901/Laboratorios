@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { isMissingBatchSchema } from "@/lib/clinical";
+import { flagNumericResult, isMissingBatchSchema, numericLimits, referenceLabel, resultNumericLimits } from "@/lib/clinical";
 import { formatDni } from "@/lib/patients";
 import type { AnalysisDefinition, Analyst, CatalogGroup, CatalogSubsection, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
 
@@ -41,26 +41,6 @@ type AnalystRow = { id: string; full_name: string; active: boolean };
 type SettingsRow = { trade_name: string | null; report_footer: string | null };
 
 const allowedFlags = new Set<Exclude<ResultFlag, "unreviewed">>(["normal", "low", "high", "critical"]);
-
-function referenceLabel(ranges: unknown) {
-  if (!Array.isArray(ranges) || ranges.length === 0) return "Por definir";
-  const range = ranges[0] as Record<string, unknown>;
-  if (typeof range.label === "string") return range.label;
-  if (range.low !== undefined && range.high !== undefined) return `${range.low} – ${range.high}`;
-  return "Según edad y sexo";
-}
-
-function numericLimits(ranges: unknown, criticalLimits: unknown) {
-  const range = Array.isArray(ranges) && ranges.length ? ranges[0] as Record<string, unknown> : {};
-  const critical = criticalLimits && typeof criticalLimits === "object" ? criticalLimits as Record<string, unknown> : {};
-  const numberOrUndefined = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
-  return {
-    low: numberOrUndefined(range.low),
-    high: numberOrUndefined(range.high),
-    criticalLow: numberOrUndefined(critical.low),
-    criticalHigh: numberOrUndefined(critical.high),
-  };
-}
 
 export async function loadLabData(
   supabase: SupabaseClient,
@@ -201,9 +181,15 @@ export async function loadLabData(
       if (!analysis || !version) return [];
       const snapshot = result?.clinical_snapshot ?? {};
       const isHistoricalUnreviewed = snapshot.historical_unreviewed === true;
-      const resultFlag: ResultFlag = isHistoricalUnreviewed
+      const limits = isHistoricalUnreviewed ? {} : resultNumericLimits(snapshot, version);
+      const storedFlag: ResultFlag = isHistoricalUnreviewed
         ? "unreviewed"
         : result && allowedFlags.has(result.flag) ? result.flag : "normal";
+      // La base marca según los intervalos que tenga cargados; mientras el catálogo
+      // solo apruebe la etiqueta, se evalúa aquí. Un aviso de la base siempre manda.
+      const resultFlag: ResultFlag = storedFlag === "normal" && typeof result?.numeric_value === "number"
+        ? flagNumericResult(result.numeric_value, limits)
+        : storedFlag;
       const value = result?.numeric_value ?? result?.qualitative_value ?? result?.text_value ?? "";
       return [{
         id: result?.id ?? item.id,
@@ -221,6 +207,7 @@ export async function loadLabData(
         reference: isHistoricalUnreviewed
           ? "Histórico · no evaluado"
           : String((snapshot.reference_range as Record<string, unknown> | null)?.label ?? referenceLabel(version?.reference_ranges)),
+        ...limits,
         flag: resultFlag,
         method: isHistoricalUnreviewed
           ? "Importado del Excel"

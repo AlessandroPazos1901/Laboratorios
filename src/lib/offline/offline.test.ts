@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDataKey,
   decryptJson,
-  derivePinKey,
+  deriveVaultKey,
   encryptJson,
   randomBase64,
   unwrapDataKey,
@@ -41,22 +41,30 @@ const emptyData: LabData = {
 };
 
 describe("cifrado offline", () => {
-  it("envuelve la clave de datos con el PIN y no conserva el JSON en claro", async () => {
+  it("envuelve la clave de datos con la contraseña y no conserva el JSON en claro", async () => {
     const salt = randomBase64();
-    const pinKey = await derivePinKey("12345678", salt);
+    const wrappingKey = await deriveVaultKey("Contraseña-Real-2026", salt);
     const dataKey = await createDataKey();
-    const wrapped = await wrapDataKey(dataKey, pinKey);
-    const restored = await unwrapDataKey(wrapped, pinKey);
+    const wrapped = await wrapDataKey(dataKey, wrappingKey);
+    const restored = await unwrapDataKey(wrapped, wrappingKey);
     const encrypted = await encryptJson(restored, { dni: "12345678", result: "Positivo" });
     expect(encrypted.ciphertext).not.toContain("12345678");
     await expect(decryptJson(restored, encrypted)).resolves.toEqual({ dni: "12345678", result: "Positivo" });
   });
 
-  it("rechaza una clave derivada de otro PIN", async () => {
+  it("rechaza una clave derivada de otra contraseña", async () => {
     const salt = randomBase64();
     const dataKey = await createDataKey();
-    const wrapped = await wrapDataKey(dataKey, await derivePinKey("12345678", salt));
-    await expect(unwrapDataKey(wrapped, await derivePinKey("87654321", salt))).rejects.toThrow();
+    const wrapped = await wrapDataKey(dataKey, await deriveVaultKey("Contraseña-Real-2026", salt));
+    await expect(unwrapDataKey(wrapped, await deriveVaultKey("Otra-Contraseña-2026", salt))).rejects.toThrow();
+  });
+
+  it("la misma contraseña con otra sal no abre la bóveda", async () => {
+    // Al cambiar la contraseña se re-envuelve con una sal nueva; esto fija que
+    // la sal forma parte de la clave y no es decorativa.
+    const dataKey = await createDataKey();
+    const wrapped = await wrapDataKey(dataKey, await deriveVaultKey("Contraseña-Real-2026", randomBase64()));
+    await expect(unwrapDataKey(wrapped, await deriveVaultKey("Contraseña-Real-2026", randomBase64()))).rejects.toThrow();
   });
 });
 

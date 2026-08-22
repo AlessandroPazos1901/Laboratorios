@@ -6,6 +6,7 @@ import Image from "next/image";
 import { LabApp } from "@/components/lab-app";
 import {
   addOfflineConflict,
+  countUnsentOperations,
   createOfflineVault,
   deleteActiveOfflineVault,
   enqueueOfflineOperation,
@@ -22,11 +23,12 @@ import {
   type OfflineVaultMeta,
   type UnlockedVault,
 } from "@/lib/offline/db";
-import { PIN_PATTERN } from "@/lib/offline/crypto";
 import { probeServerConnectivity } from "@/lib/offline/connectivity";
 import { resultConflictAlreadyApplied, resultConflictDetails } from "@/lib/offline/materialize";
+import { rebaseSnapshot } from "@/lib/offline/rebase";
+import { orderOperationsByDependencies } from "@/lib/offline/sync";
 import { OfflineRepositoryProvider } from "@/lib/offline/repository";
-import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { createClient, isSupabaseConfigured, resolveLoginEmail } from "@/lib/supabase/client";
 import {
   OFFLINE_MODE_ENABLED,
   type OfflineLease,
@@ -91,13 +93,19 @@ export function OfflineAppBootstrap() {
   const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
   const [data, setData] = useState<LabData | null>(null);
   const [currentUser, setCurrentUser] = useState<SyncBundle["currentUser"] | null>(null);
-  const [bundle, setBundle] = useState<SyncBundle | null>(null);
   const [session, setSession] = useState<UnlockedVault | null>(null);
   const [meta, setMeta] = useState<OfflineVaultMeta | null>(null);
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
+  // Distinto de null: la copia local está cifrada con un secreto anterior y hay
+  // que rehacerla. El número dice cuántos cambios sin enviar se perderían.
+  const [stalePending, setStalePending] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const syncRequested = useRef(0);
   const syncingRef = useRef(false);
+  // `requestSync` se dispara desde un `setTimeout` y desde escuchadores de ventana:
+  // sin esta referencia capturaban la bóveda del render anterior al commit.
+  const sessionRef = useRef<UnlockedVault | null>(session);
+  sessionRef.current = session;
 
   const fetchBundle = useCallback(async (cursor = 0) => {
     let response: Response;
@@ -108,10 +116,9 @@ export function OfflineAppBootstrap() {
       setOnline(false);
       throw reason;
     }
-    if (response.status === 401) {
-      window.location.replace("/login");
-      throw new Error("session_required");
-    }
+    // Un 401 no manda a otra pantalla: quien lo recibe decide. En el arranque
+    // significa «pide credenciales aquí»; durante una sincronización, «la sesión
+    // caducó». Antes redirigía siempre y por eso había dos pantallas de ingreso.
     const remote = await jsonResponse<SyncBundle>(response);
     return { ...remote, data: normalizeOfflineData(remote.data, true) };
   }, []);
@@ -125,25 +132,45 @@ export function OfflineAppBootstrap() {
     return operations;
   }, []);
 
+  /**
+   * El servidor responde siempre con el snapshot completo. Guardarlo tal cual
+   * borraba de la pantalla cualquier cambio que siguiera en la cola: la operación
+   * quedaba encolada pero su efecto desaparecía a los segundos. Por eso todo
+   * snapshot que llega pasa antes por `rebaseSnapshot`.
+   */
+  const applyRemoteSnapshot = useCallback(async (active: UnlockedVault | null, remote: SyncBundle) => {
+    const pending = active
+      ? (await listOfflineOperations(active, ["pending", "syncing", "blocked"])).map(({ operation }) => operation)
+      : [];
+    const merged = rebaseSnapshot(remote.data, pending, remote.currentUser.fullName);
+    setData(merged);
+    setCurrentUser(remote.currentUser);
+    if (!active) return null;
+    const snapshot = { data: merged, currentUser: remote.currentUser, updatedAt: remote.serverTime };
+    const updated = await saveOfflineSnapshot(active, snapshot, remote.cursor);
+    setSession(updated);
+    setMeta(updated.meta);
+    return updated;
+  }, []);
+
   const refreshOnlineData = useCallback(async () => {
-    const remote = await fetchBundle(session?.meta.cursor ?? 0);
-    if (session?.snapshot.data.patients.length && !remote.data.patients.length) {
+    const active = sessionRef.current;
+    const remote = await fetchBundle(active?.meta.cursor ?? 0);
+    if (active?.snapshot.data.patients.length && !remote.data.patients.length) {
       throw new Error("La descarga no contiene pacientes; se conservó la copia local anterior.");
     }
-    setBundle(remote);
-    setData(remote.data);
-    setCurrentUser(remote.currentUser);
-    if (session) {
-      const snapshot = { data: remote.data, currentUser: remote.currentUser, updatedAt: remote.serverTime };
-      const updatedSession = await saveOfflineSnapshot(session, snapshot, remote.cursor);
-      setSession(updatedSession);
-      setMeta(updatedSession.meta);
-      await refreshCounters(updatedSession);
-    }
-  }, [fetchBundle, refreshCounters, session]);
+    const updated = await applyRemoteSnapshot(active, remote);
+    if (updated) await refreshCounters(updated);
+  }, [applyRemoteSnapshot, fetchBundle, refreshCounters]);
 
-  const performSync = useCallback(async (active = session) => {
-    if (!active || !navigator.onLine || syncingRef.current) return;
+  const performSync = useCallback(async (input?: UnlockedVault) => {
+    const active = input ?? sessionRef.current;
+    if (!active || syncingRef.current) return;
+    if (!await probeServerConnectivity()) {
+      setOnline(false);
+      return;
+    }
+    setOnline(true);
     let working: UnlockedVault = { ...active, meta: { ...active.meta }, snapshot: active.snapshot };
     syncingRef.current = true;
     setMessage("");
@@ -157,18 +184,27 @@ export function OfflineAppBootstrap() {
         working = { ...working, meta: await renewOfflineVaultLease(working.meta, lease) };
         setMeta(working.meta);
       }
-      const queued = await listOfflineOperations(working, ["pending", "blocked"]);
-      if (queued.length) {
-        queued.forEach(({ operation }) => void setOfflineOperationStatus(working, operation.clientMutationId, "syncing"));
-        const payload = { deviceId: working.meta.deviceId, operations: queued.slice(0, 50).map((item) => item.operation) };
+      // El envío admite 50 operaciones por lote. Antes se mandaba uno solo y el
+      // resto quedaba varado; ahora se vacía la cola en tandas sucesivas.
+      for (;;) {
+        const queued = orderOperationsByDependencies(await listOfflineOperations(working, ["pending", "blocked"]));
+        if (!queued.length) break;
+        const sending = queued.slice(0, 50);
+        // Solo el lote que realmente sale se marca "syncing": marcar toda la cola
+        // dejaba lo que no cabía en un estado que ningún envío posterior recoge.
+        await Promise.all(sending.map(({ operation }) =>
+          setOfflineOperationStatus(working, operation.clientMutationId, "syncing")));
+        const payload = { deviceId: working.meta.deviceId, operations: sending.map((item) => item.operation) };
         const pushed = await jsonResponse<{ results: SyncPushResult[] }>(await fetch("/api/sync/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         }));
+        let resolved = 0;
         for (const result of pushed.results) {
           if (result.status === "applied") {
             await removeOfflineOperation(working, result.clientMutationId);
+            resolved += 1;
           } else if (result.status === "conflict" && result.conflict) {
             const conflict: SyncConflict = {
               ...result.conflict,
@@ -177,10 +213,18 @@ export function OfflineAppBootstrap() {
             };
             await addOfflineConflict(working, conflict);
             await removeOfflineOperation(working, result.clientMutationId);
+            resolved += 1;
           } else {
             await setOfflineOperationStatus(working, result.clientMutationId, "blocked", result.error);
           }
         }
+        // El servidor puede no devolver una operación que sí enviamos; sin esto
+        // se quedaría en "syncing" para siempre.
+        const unanswered = await listOfflineOperations(working, ["syncing"]);
+        await Promise.all(unanswered.map(({ operation }) =>
+          setOfflineOperationStatus(working, operation.clientMutationId, "pending")));
+        // Lote entero rechazado: repetirlo en bucle no cambiaría el resultado.
+        if (!resolved) break;
       }
       const remote = await fetchBundle(working.meta.cursor);
       if (working.snapshot.data.patients.length && !remote.data.patients.length) {
@@ -190,27 +234,32 @@ export function OfflineAppBootstrap() {
       const duplicateConflicts = savedConflicts.filter((conflict) =>
         resultConflictAlreadyApplied(conflict, remote.data));
       await Promise.all(duplicateConflicts.map((conflict) => removeOfflineConflict(working, conflict.id)));
-      const snapshot = { data: remote.data, currentUser: remote.currentUser, updatedAt: remote.serverTime };
-      working = await saveOfflineSnapshot(working, snapshot, remote.cursor);
-      setSession(working);
-      setData(remote.data);
-      setCurrentUser(remote.currentUser);
-      setBundle(remote);
-      setMeta(working.meta);
-      await refreshCounters(working);
-      syncRequested.current = 0;
-      setMessage("Todos los cambios fueron guardados.");
-    } catch {
+      working = await applyRemoteSnapshot(working, remote) ?? working;
+      const remaining = await refreshCounters(working);
+      syncRequested.current = remaining.length;
+      setMessage(remaining.length
+        ? `${remaining.length === 1 ? "Un cambio sigue" : `${remaining.length} cambios siguen`} pendiente${remaining.length === 1 ? "" : "s"} de guardarse. Se reintentará solo.`
+        : "Todos los cambios fueron guardados.");
+    } catch (reason) {
+      // El servidor responde pero la sesión caducó. Sin esto la cola se reintentaba
+      // en bucle contra un 401 y la insignia seguía diciendo «Con conexión».
+      if (reason instanceof Error && reason.message === "http_401") {
+        window.location.replace("/login");
+        return;
+      }
       const reachable = await probeServerConnectivity();
       setOnline(reachable);
-      setMessage(!reachable ? "Sin internet. Los cambios permanecen guardados en este equipo." : "Algunos cambios aún no se guardaron. Pulsa «Guardar cambios» para volver a intentarlo.");
+      setMessage(!reachable
+        ? "Sin internet. Los cambios permanecen guardados en este equipo."
+        : "Algunos cambios aún no se guardaron. Se reintentará automáticamente.");
       const queued = await listOfflineOperations(working, ["syncing"]);
       await Promise.all(queued.map(({ operation }) => setOfflineOperationStatus(working, operation.clientMutationId, "pending")));
-      await refreshCounters(working);
+      const remaining = await refreshCounters(working);
+      syncRequested.current = remaining.length;
     } finally {
       syncingRef.current = false;
     }
-  }, [fetchBundle, refreshCounters, session]);
+  }, [applyRemoteSnapshot, fetchBundle, refreshCounters]);
 
   useEffect(() => {
     let mounted = true;
@@ -223,23 +272,12 @@ export function OfflineAppBootstrap() {
         const localMeta = await getActiveVaultMeta();
         if (!mounted) return;
         setMeta(localMeta ?? null);
-        if (localMeta) {
-          setStatus(new Date(localMeta.lease.expiresAt).getTime() <= Date.now() ? "expired" : "locked");
-          return;
-        }
-        const reachable = await probeServerConnectivity();
+        setOnline(await probeServerConnectivity());
         if (!mounted) return;
-        setOnline(reachable);
-        if (!reachable) {
-          setStatus("not-prepared");
-          return;
-        }
-        const remote = await fetchBundle();
-        if (!mounted) return;
-        setBundle(remote);
-        setData(remote.data);
-        setCurrentUser(remote.currentUser);
-        setStatus("not-prepared");
+        // Haya o no bóveda, haya o no internet, la puerta es la misma: el
+        // formulario de ingreso. Él decide si valida contra Supabase o contra la
+        // copia local.
+        setStatus("needs-access");
       } catch (error) {
         if (!mounted) return;
         const reason = error instanceof Error ? error.message : "";
@@ -254,6 +292,9 @@ export function OfflineAppBootstrap() {
   }, [fetchBundle]);
 
   useEffect(() => {
+    // También en la pantalla de ingreso: hay que saber si validar contra la base
+    // o contra la copia local, y el texto del formulario lo dice.
+    if (status !== "unlocked" && status !== "needs-access") return;
     let mounted = true;
     const checkConnectivity = async () => {
       const reachable = await probeServerConnectivity();
@@ -261,47 +302,61 @@ export function OfflineAppBootstrap() {
       setOnline(reachable);
       return reachable;
     };
-    const wentOnline = () => {
-      void checkConnectivity().then((reachable) => {
-        if (reachable && session && syncRequested.current > 0) void performSync(session);
-      });
+    /**
+     * Un solo ciclo cubre las dos necesidades: subir lo que está en la cola y
+     * bajar lo que hicieron los demás equipos (`performSync` termina con un pull).
+     * Sin esto, con varias personas trabajando a la vez cada una veía su propia
+     * copia congelada hasta recargar.
+     */
+    const catchUp = async () => {
+      if (!await checkConnectivity() || !sessionRef.current) return;
+      await performSync(sessionRef.current);
     };
+    const wentOnline = () => void catchUp();
     const wentOffline = () => setOnline(false);
+    const visibilityChanged = () => { if (document.visibilityState === "visible") void catchUp(); };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void catchUp();
+    }, 30_000);
     window.addEventListener("online", wentOnline);
     window.addEventListener("offline", wentOffline);
-    const visibilityChanged = () => { if (document.visibilityState === "visible") void checkConnectivity(); };
     document.addEventListener("visibilitychange", visibilityChanged);
     void checkConnectivity();
     return () => {
       mounted = false;
+      window.clearInterval(timer);
       window.removeEventListener("online", wentOnline);
       window.removeEventListener("offline", wentOffline);
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
-  }, [performSync, session]);
+  }, [performSync, refreshOnlineData, status]);
 
-  const requestSync = () => {
+  const requestSync = useCallback(() => {
     syncRequested.current += 1;
-    if (session && online) window.setTimeout(() => void performSync(session), 0);
-    if (session) void refreshCounters(session);
-  };
+    const active = sessionRef.current;
+    if (!active) return;
+    void refreshCounters(active);
+    window.setTimeout(() => void performSync(), 0);
+  }, [performSync, refreshCounters]);
 
-  async function enroll(pin: string, deviceName: string) {
-    if (!bundle || !PIN_PATTERN.test(pin)) throw new Error("El PIN debe tener exactamente 4 dígitos.");
+  /** Primer ingreso en este equipo: descarga los datos y deja la copia cifrada lista. */
+  async function prepareDevice(password: string) {
     const storage = await requestPersistentOfflineStorage();
     const available = Math.max(0, storage.quota - storage.usage);
     if (storage.quota && available < 25 * 1024 * 1024) throw new Error("Este equipo no tiene suficiente espacio libre para guardar los datos necesarios.");
+    const remote = await fetchBundle();
     const deviceId = crypto.randomUUID();
+    const deviceName = `Equipo ${navigator.userAgent.includes("Windows") ? "Windows" : "de laboratorio"}`;
     const { lease } = await jsonResponse<{ lease: OfflineLease }>(await fetch("/api/offline/enroll", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deviceId, deviceName }),
     }));
     const unlocked = await createOfflineVault({
-      pin,
+      password,
       lease,
-      snapshot: { data: bundle.data, currentUser: bundle.currentUser, updatedAt: bundle.serverTime },
-      cursor: bundle.cursor,
+      snapshot: { data: remote.data, currentUser: remote.currentUser, updatedAt: remote.serverTime },
+      cursor: remote.cursor,
     });
     setSession(unlocked);
     setMeta(unlocked.meta);
@@ -311,8 +366,47 @@ export function OfflineAppBootstrap() {
     await refreshCounters(unlocked);
   }
 
-  async function unlock(pin: string) {
-    const unlocked = await unlockOfflineVault(pin);
+  /**
+   * Una sola puerta. Con internet manda Supabase, que es la única autoridad sobre
+   * la contraseña. Sin internet vale que la contraseña abra la bóveda local: solo
+   * pudo cifrarse así tras un ingreso conectado válido.
+   */
+  async function signIn(username: string, password: string) {
+    const reachable = await probeServerConnectivity();
+    setOnline(reachable);
+    if (reachable) {
+      const email = await resolveLoginEmail(username);
+      const failed = !email || (await createClient().auth.signInWithPassword({ email, password })).error;
+      if (failed) throw new Error("bad_credentials");
+      const localMeta = await getActiveVaultMeta();
+      if (!localMeta) return prepareDevice(password);
+      if (new Date(localMeta.lease.expiresAt).getTime() <= Date.now()) {
+        const { lease } = await jsonResponse<{ lease: OfflineLease }>(await fetch("/api/offline/renew", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deviceId: localMeta.deviceId }),
+        }));
+        setMeta(await renewOfflineVaultLease(localMeta, lease));
+      }
+      try {
+        return await unlock(password);
+      } catch (reason) {
+        if (!(reason instanceof Error) || reason.message !== "offline_password_incorrect") throw reason;
+        // Supabase aceptó la contraseña, así que no está mal escrita: la copia
+        // local se cifró con un secreto anterior (el PIN de la versión previa, o
+        // una contraseña cambiada en otro equipo). No es un error de tecleo y
+        // decirlo así confunde: hay que rehacer la copia.
+        setStalePending(await countUnsentOperations(localMeta.id));
+        throw new Error("stale_vault");
+      }
+    }
+    if (!meta) throw new Error("offline_not_prepared");
+    if (new Date(meta.lease.expiresAt).getTime() <= Date.now()) throw new Error("offline_lease_expired");
+    return unlock(password);
+  }
+
+  async function unlock(password: string) {
+    const unlocked = await unlockOfflineVault(password);
     const normalized = {
       ...unlocked,
       snapshot: { ...unlocked.snapshot, data: normalizeOfflineData(unlocked.snapshot.data) },
@@ -322,24 +416,27 @@ export function OfflineAppBootstrap() {
     setData(normalized.snapshot.data);
     setCurrentUser(unlocked.snapshot.currentUser);
     setStatus("unlocked");
+    // Si la pestaña se cerró a mitad de un envío, esas operaciones quedaron en
+    // "syncing" y ningún envío posterior las recoge. Al abrir se devuelven a la
+    // cola; reenviarlas es inofensivo porque el recibo del servidor las deduplica.
+    const stranded = await listOfflineOperations(normalized, ["syncing"]);
+    await Promise.all(stranded.map(({ operation }) =>
+      setOfflineOperationStatus(normalized, operation.clientMutationId, "pending")));
     const queuedOperations = await refreshCounters(normalized);
-    const creationOperations = queuedOperations.filter(({ operation }) =>
-      operation.kind === "patient.upsert" || operation.kind === "analysis.register");
-    syncRequested.current = creationOperations.length;
-    if (online && creationOperations.length > 0) void performSync(normalized);
+    // Cualquier cambio pendiente merece salir, no solo los que crean registros:
+    // una edición de catálogo hecha sin conexión también tiene que subir. Y aunque
+    // no haya nada que subir, conviene bajar lo que hicieron los otros equipos.
+    syncRequested.current = queuedOperations.length;
+    void performSync(normalized);
   }
 
-  async function renew() {
-    if (!meta || !online) return;
-    const { lease } = await jsonResponse<{ lease: OfflineLease }>(await fetch("/api/offline/renew", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: meta.deviceId }),
-    }));
-    const updated = await renewOfflineVaultLease(meta, lease);
-    setMeta(updated);
-    setStatus("locked");
-    setMessage("El equipo está listo. Ingresa el PIN para abrir los datos.");
+  /** Borra la copia local ilegible y la vuelve a bajar. Ya hay sesión válida. */
+  async function rebuildDevice(password: string) {
+    if (meta) await fetch(`/api/offline/devices/${meta.deviceId}`, { method: "DELETE" }).catch(() => undefined);
+    await deleteActiveOfflineVault();
+    setMeta(null);
+    setStalePending(null);
+    await prepareDevice(password);
   }
 
   async function deleteVault() {
@@ -390,11 +487,8 @@ export function OfflineAppBootstrap() {
   }
   if (status === "loading") return <OfflineGate icon={<Activity className="spin" />} title="Preparando LIMS Jose" text="Comprobando los datos guardados en este equipo…" />;
   if (status === "error") return <OfflineGate icon={<CloudOff />} title="No se pudo abrir el sistema" text={message || "Reconecta este equipo y vuelve a intentarlo."} actionLabel="Cerrar sesión y volver al ingreso" action={signOutAfterStartupError} />;
-  if (status === "not-prepared" && !data) {
-    return <OfflineGate icon={<Database />} title="Este equipo no está preparado" text="Conéctalo a internet, inicia sesión y elige «Preparar este equipo» para poder trabajar cuando se corte la conexión." />;
-  }
-  if ((status === "locked" || status === "expired") && meta) {
-    return <UnlockGate meta={meta} expired={status === "expired"} online={online} message={message} unlock={unlock} renew={renew} deleteVault={deleteVault} />;
+  if (status === "needs-access") {
+    return <AccessGate meta={meta} online={online} message={message} signIn={signIn} deleteVault={deleteVault} stalePending={stalePending} rebuildDevice={rebuildDevice} />;
   }
   if (!data || !currentUser) return <OfflineGate icon={<Database />} title="Datos no disponibles" text="Este equipo todavía no tiene los datos necesarios para trabajar sin internet." />;
 
@@ -409,8 +503,7 @@ export function OfflineAppBootstrap() {
     requestSync={requestSync}
   >
     <div className="offline-runtime-shell">
-      {status === "not-prepared" && bundle && <EnrollPanel enroll={enroll} />}
-      {conflicts.length > 0 && <ConflictPanel conflicts={conflicts} data={data} acceptRemote={acceptRemote} retryLocal={retryLocal} />}
+      {conflicts.length > 0 &&<ConflictPanel conflicts={conflicts} data={data} acceptRemote={acceptRemote} retryLocal={retryLocal} />}
       <LabApp data={data} currentUser={{ fullName: currentUser.fullName, role: currentUser.role }} />
     </div>
   </OfflineRepositoryProvider>;
@@ -420,21 +513,87 @@ function OfflineGate({ icon, title, text, actionLabel, action }: { icon: React.R
   return <main className="offline-gate"><section><span>{icon}</span><p className="eyebrow">Trabajo sin internet</p><h1>{title}</h1><p>{text}</p>{actionLabel && action && <button className="button primary" onClick={() => void action()}>{actionLabel}</button>}<Image src="/logo_laboratorio.png" width={786} height={156} alt="Laboratorio Clínico Centro de Salud" /></section></main>;
 }
 
-function EnrollPanel({ enroll }: { enroll(pin: string, deviceName: string): Promise<void> }) {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState(() => `Equipo ${navigator.platform || "Windows"}`);
-  const [pin, setPin] = useState("");
-  const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-  if (!open) return <div className="offline-enroll-banner"><ShieldCheck /><span><strong>Prepara este equipo para trabajar sin internet.</strong><small>Podrás consultar pacientes y guardar resultados aunque se corte la conexión.</small></span><button className="button primary" onClick={() => setOpen(true)}>Preparar este equipo</button></div>;
-  return <div className="dialog-backdrop offline-setup-dialog"><section className="dialog-card"><p className="eyebrow">Trabajo sin internet</p><h2>Preparar este equipo</h2><p>Este equipo podrá abrir los datos durante 72 horas aunque no tenga internet. Elige un PIN de 4 dígitos y no lo compartas.</p><label>Nombre del equipo<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} /></label><label>PIN de 4 dígitos<input type="password" inputMode="numeric" autoComplete="off" maxLength={4} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 4))} /></label>{error && <p className="form-error">{error}</p>}<div className="dialog-actions"><button className="button secondary" onClick={() => setOpen(false)}>Cancelar</button><button className="button primary" disabled={saving || !PIN_PATTERN.test(pin) || name.trim().length < 2} onClick={async () => { setSaving(true); setError(""); try { await enroll(pin, name.trim()); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo preparar el equipo."); } finally { setSaving(false); } }}>{saving ? "Preparando…" : "Preparar equipo"}</button></div></section></div>;
-}
+const accessError: Record<string, string> = {
+  bad_credentials: "Usuario o contraseña incorrectos.",
+  offline_password_incorrect: "Contraseña incorrecta.",
+  offline_not_prepared: "Este equipo aún no se ha usado con internet. Conéctalo una vez para poder trabajar sin conexión.",
+  offline_lease_expired: "Han pasado más de 72 horas sin conexión. Conecta el equipo una vez para continuar.",
+  offline_database_blocked: "Los datos están abiertos en otra ventana. Cierra las demás pestañas de LIMS José.",
+};
 
-function UnlockGate(props: { meta: OfflineVaultMeta; expired: boolean; online: boolean; message: string; unlock(pin: string): Promise<void>; renew(): Promise<void>; deleteVault(): Promise<void> }) {
-  const [pin, setPin] = useState("");
+/**
+ * La única pantalla de ingreso. Con internet valida contra la base; sin internet,
+ * contra la copia cifrada de este equipo. Mismo usuario y misma contraseña en los
+ * dos casos: antes había que iniciar sesión y además recordar un PIN aparte.
+ */
+function AccessGate(props: {
+  meta: OfflineVaultMeta | null;
+  online: boolean;
+  message: string;
+  stalePending: number | null;
+  signIn(username: string, password: string): Promise<void>;
+  rebuildDevice(password: string): Promise<void>;
+  deleteVault(): Promise<void>;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  return <main className="offline-gate"><section><span>{props.expired ? <CloudOff /> : <LockKeyhole />}</span><p className="eyebrow">{props.meta.deviceName}</p><h1>{props.expired ? "Conecta este equipo para continuar" : "Datos protegidos"}</h1><p>{props.expired ? "Conecta el equipo a internet una vez para volver a abrir los datos." : `Puedes trabajar sin internet hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`}</p>{props.message && <p className="compat-note">{props.message}</p>}{!props.expired && <><label>PIN<input autoFocus type="password" inputMode="numeric" autoComplete="off" maxLength={32} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 32))} onKeyDown={(event) => { if (event.key === "Enter") (event.currentTarget.nextElementSibling as HTMLButtonElement | null)?.click(); }} /></label><button className="button primary wide" disabled={loading || !PIN_PATTERN.test(pin)} onClick={async () => { setLoading(true); setError(""); try { await props.unlock(pin); } catch (reason) { setError(reason instanceof Error && reason.message === "offline_pin_incorrect" ? "PIN incorrecto." : "No se pudieron abrir los datos."); } finally { setLoading(false); } }}><KeyRound />{loading ? "Abriendo…" : "Abrir datos"}</button></>}{props.expired && <button className="button primary wide" disabled={!props.online || loading} onClick={async () => { setLoading(true); setError(""); try { await props.renew(); } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo preparar el equipo."); } finally { setLoading(false); } }}><RefreshCw />{props.online ? "Habilitar por 72 horas" : "Conecta este equipo"}</button>}{error && <p className="form-error">{error}</p>}<button className="text-button danger-text" onClick={() => void props.deleteVault()}><Trash2 />Eliminar los datos guardados en este equipo</button></section></main>;
+
+  const run = async (action: () => Promise<void>) => {
+    setLoading(true);
+    setError("");
+    try {
+      await action();
+    } catch (reason) {
+      const code = reason instanceof Error ? reason.message : "";
+      setError(accessError[code] ?? "No se pudo ingresar. Vuelve a intentarlo.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    void run(() => props.signIn(username, password));
+  };
+
+  const stalePending = props.stalePending;
+  if (stalePending !== null) {
+    return <main className="offline-gate"><section>
+      <span><Database /></span>
+      <p className="eyebrow">Copia local desactualizada</p>
+      <h1>Hay que rehacer los datos de este equipo</h1>
+      <p>Tu contraseña es correcta. Lo que pasa es que esta computadora guardó su copia con la clave anterior (el PIN que se usaba antes), y esa copia ya no se puede abrir.</p>
+      <p>{stalePending > 0
+        ? `Atención: quedan ${stalePending} ${stalePending === 1 ? "cambio sin enviar que se perderá" : "cambios sin enviar que se perderán"}. No se pueden recuperar porque están cifrados con la clave anterior.`
+        : "No hay cambios sin enviar, así que no se pierde nada: los datos se vuelven a descargar del servidor."}</p>
+      {error && <p className="form-error">{error}</p>}
+      <button className="button primary wide" disabled={loading} onClick={() => {
+        if (stalePending > 0 && !window.confirm(`Se perderán ${stalePending} cambios sin enviar. ¿Continuar?`)) return;
+        void run(() => props.rebuildDevice(password));
+      }}><RefreshCw />{loading ? "Descargando…" : "Rehacer la copia de este equipo"}</button>
+    </section></main>;
+  }
+
+  return <main className="offline-gate"><section>
+    <span>{props.online ? <ShieldCheck /> : <LockKeyhole />}</span>
+    <p className="eyebrow">{props.online ? "Con conexión" : "Sin conexión"}</p>
+    <h1>Iniciar sesión</h1>
+    <p>{props.online
+      ? "Ingresa con tu usuario y contraseña. Este equipo quedará listo para seguir trabajando si se corta el internet."
+      : props.meta
+        ? `Sin internet. Usa la misma contraseña de siempre; puedes trabajar hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`
+        : "Sin internet y este equipo todavía no tiene datos guardados. Conéctalo una vez para prepararlo."}</p>
+    {props.message && <p className="compat-note">{props.message}</p>}
+    <form onSubmit={submit}>
+      <label>Usuario<input autoFocus type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+      <label>Contraseña<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+      {error && <p className="form-error">{error}</p>}
+      <button className="button primary wide" type="submit" disabled={loading || !username.trim() || !password}><KeyRound />{loading ? "Ingresando…" : "Ingresar"}</button>
+    </form>
+    {props.meta && <button className="text-button danger-text" onClick={() => void props.deleteVault()}><Trash2 />Eliminar los datos guardados en este equipo</button>}
+  </section></main>;
 }
 
 function ConflictPanel(props: { conflicts: SyncConflict[]; data: LabData; acceptRemote(conflict: SyncConflict): Promise<void>; retryLocal(conflict: SyncConflict): Promise<void> }) {

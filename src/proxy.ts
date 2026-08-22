@@ -33,7 +33,13 @@ export async function proxy(request: NextRequest) {
     if (request.nextUrl.pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Sesion requerida." }, { status: 401 });
     }
-    return NextResponse.redirect(new URL("/login", request.url));
+    // Con réplica local, /app trae su propio formulario de ingreso: es el mismo
+    // que se usa sin internet, y así el personal ve una sola pantalla en lugar
+    // de iniciar sesión aquí y volver a identificarse al abrir los datos.
+    // Los datos siguen protegidos: /api responde 401 sin sesión.
+    if (process.env.NEXT_PUBLIC_OFFLINE_MODE !== "true") {
+      return NextResponse.redirect(new URL("/login", request.url));
+    }
   }
 
   return response;
