@@ -1,9 +1,10 @@
 "use client";
 
-import { Activity, CloudOff, Database, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Activity, CloudOff, Database, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { LabApp } from "@/components/lab-app";
+import { ConnectionBadge, LoginCardVisual, LoginScreen, LoginShell } from "@/components/login-screen";
 import {
   addOfflineConflict,
   countUnsentOperations,
@@ -117,6 +118,9 @@ export function OfflineAppBootstrap() {
   // Distinto de null: la copia local está cifrada con un secreto anterior y hay
   // que rehacerla. El número dice cuántos cambios sin enviar se perderían.
   const [stalePending, setStalePending] = useState<number | null>(null);
+  // La contraseña que acaba de validar Supabase, para rehacer la copia sin
+  // volver a pedirla. Vive en memoria solo hasta que se usa.
+  const stalePasswordRef = useRef("");
   const [message, setMessage] = useState("");
   const syncRequested = useRef(0);
   const syncingRef = useRef(false);
@@ -482,6 +486,7 @@ export function OfflineAppBootstrap() {
         // local se cifró con un secreto anterior (el PIN de la versión previa, o
         // una contraseña cambiada en otro equipo). No es un error de tecleo y
         // decirlo así confunde: hay que rehacer la copia.
+        stalePasswordRef.current = password;
         setStalePending(await countUnsentOperations(localMeta.id));
         throw new Error("stale_vault");
       }
@@ -520,13 +525,16 @@ export function OfflineAppBootstrap() {
   }
 
   /** Borra la copia local ilegible y la vuelve a bajar. Ya hay sesión válida. */
-  async function rebuildDevice(password: string) {
+  async function rebuildDevice() {
+    const password = stalePasswordRef.current;
+    if (!password) throw new Error("bad_credentials");
     if (meta) await fetch(`/api/offline/devices/${meta.deviceId}`, { method: "DELETE" }).catch(() => undefined);
     await deleteActiveOfflineVault();
     forgetVaultKey();
     setMeta(null);
     setStalePending(null);
     await prepareDevice(password);
+    stalePasswordRef.current = "";
   }
 
   async function deleteVault() {
@@ -623,11 +631,9 @@ function AccessGate(props: {
   message: string;
   stalePending: number | null;
   signIn(username: string, password: string): Promise<void>;
-  rebuildDevice(password: string): Promise<void>;
+  rebuildDevice(): Promise<void>;
   deleteVault(): Promise<void>;
 }) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -644,50 +650,44 @@ function AccessGate(props: {
     }
   };
 
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    void run(() => props.signIn(username, password));
-  };
-
   const stalePending = props.stalePending;
   if (stalePending !== null) {
-    return <main className="offline-gate"><section>
-      <span><Database /></span>
-      <p className="eyebrow">Copia local desactualizada</p>
-      <h1>Hay que rehacer los datos de este equipo</h1>
-      <p>Tu contraseña es correcta. Lo que pasa es que esta computadora guardó su copia con la clave anterior (el PIN que se usaba antes), y esa copia ya no se puede abrir.</p>
-      <p>{stalePending > 0
+    return <LoginShell><section className="login-card">
+      <LoginCardVisual />
+      <div>
+        <ConnectionBadge online={props.online} />
+        <h2>Hay que rehacer los datos de este equipo</h2>
+        <p className="muted">Tu contraseña es correcta. Lo que pasa es que esta computadora guardó su copia con la clave anterior, y esa copia ya no se puede abrir.</p>
+      </div>
+      <p className="compat-note">{stalePending > 0
         ? `Atención: quedan ${stalePending} ${stalePending === 1 ? "cambio sin enviar que se perderá" : "cambios sin enviar que se perderán"}. No se pueden recuperar porque están cifrados con la clave anterior.`
         : "No hay cambios sin enviar, así que no se pierde nada: los datos se vuelven a descargar del servidor."}</p>
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="form-error" role="alert">{error}</p>}
       <button className="button primary wide" disabled={loading} onClick={() => {
         if (stalePending > 0 && !window.confirm(`Se perderán ${stalePending} cambios sin enviar. ¿Continuar?`)) return;
-        void run(() => props.rebuildDevice(password));
+        void run(() => props.rebuildDevice());
       }}><RefreshCw />{loading ? "Descargando…" : "Rehacer la copia de este equipo"}</button>
-    </section></main>;
+    </section></LoginShell>;
   }
 
-  return <main className="offline-gate"><section>
-    <span>{props.online ? <ShieldCheck /> : <LockKeyhole />}</span>
-    <p className="eyebrow">{props.online ? "Con conexión" : "Sin conexión"}</p>
-    <h1>Iniciar sesión</h1>
-    {/* Con internet se entra por la pantalla principal, así que esta casi
-        siempre se ve sin conexión. El caso conectado queda por si vuelve el
-        internet con el formulario ya abierto. */}
-    <p>{props.online
-      ? "Ya hay conexión. Ingresa con tu usuario y contraseña de siempre."
+  return <LoginScreen
+    online={props.online}
+    intro={props.online
+      ? "Ingresa con la cuenta compartida autorizada del laboratorio."
       : props.meta
-        ? `Sin internet. Usa tu usuario y la misma contraseña de siempre; puedes trabajar hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`
-        : "Sin internet y este equipo todavía no tiene datos guardados. Conéctalo una vez para prepararlo."}</p>
-    {props.message && <p className="compat-note">{props.message}</p>}
-    <form onSubmit={submit}>
-      <label>Usuario<input autoFocus type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(event) => setUsername(event.target.value)} /></label>
-      <label>Contraseña<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-      {error && <p className="form-error">{error}</p>}
-      <button className="button primary wide" type="submit" disabled={loading || !username.trim() || !password}><KeyRound />{loading ? "Ingresando…" : "Ingresar"}</button>
-    </form>
-    {props.meta && <button className="text-button danger-text" onClick={() => void props.deleteVault()}><Trash2 />Eliminar los datos guardados en este equipo</button>}
-  </section></main>;
+        ? `Sin internet, con la misma contraseña de siempre. Puedes trabajar hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`
+        : "Sin internet y este equipo todavía no tiene datos guardados. Conéctalo una vez para prepararlo."}
+    notice={props.message || undefined}
+    error={error}
+    loading={loading}
+    loadingLabel="Ingresando…"
+    onSubmit={(username, password) => void run(() => props.signIn(username, password))}
+    footer={props.meta
+      ? <button type="button" className="text-button danger-text" onClick={() => void props.deleteVault()}>
+          <Trash2 />Eliminar los datos guardados en este equipo
+        </button>
+      : undefined}
+  />;
 }
 
 function ConflictPanel(props: { conflicts: SyncConflict[]; data: LabData; acceptRemote(conflict: SyncConflict): Promise<void>; retryLocal(conflict: SyncConflict): Promise<void> }) {

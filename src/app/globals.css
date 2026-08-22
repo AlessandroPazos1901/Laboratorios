@@ -84,6 +84,12 @@ small { font-size: .82rem; line-height: 1.4; }
 .form-error { margin: -10px 0; padding: 10px 12px; border-left: 3px solid var(--red); color: var(--red); background: #fff1f1; }
 .login-help { margin: 2px 0 0; color: #53606c; text-align: center; font-size: .92rem; }
 .login-recovery { margin-top: -14px; justify-self: end; font-size: .9rem; }
+/* Lo único que distingue la pantalla de ingreso con internet de la de sin él. */
+.login-status { display: inline-flex; margin-bottom: 10px; padding: 4px 11px 4px 9px; align-items: center; gap: 7px; border: 1px solid; border-radius: 999px; font: 700 .72rem/1 var(--font-heading); letter-spacing: .09em; text-transform: uppercase; }
+.login-status.online { border-color: #b9d6ba; color: #1d6b3f; background: #eef8f0; }
+.login-status.online .status-dot { margin: 0; background: #11694e; }
+.login-status.offline { border-color: var(--tan); color: #7a4c1f; background: var(--tan-soft); }
+.login-status.offline .status-dot { margin: 0; background: var(--brown); }
 .reset-shell { display: grid; min-height: 100vh; padding: 30px; place-items: center; background: var(--canvas); }
 .reset-card { padding: 34px; border: 1px solid var(--line); border-radius: 10px; background: white; box-shadow: var(--shadow); }
 .brand-mark.dark { color: var(--ink); }.brand-mark.dark svg { color: var(--teal); }
