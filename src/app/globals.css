@@ -412,7 +412,7 @@ td > svg { width: 16px; color: #878f96; }
 
 /* Dialogs */
 .dialog-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; padding: 24px; place-items: center; background: rgba(9, 27, 31, .55); backdrop-filter: blur(2px); }
-.dialog-card { overflow: hidden; width: min(760px, 100%); max-height: min(880px, calc(100vh - 48px)); border: 1px solid var(--line); border-radius: 12px; background: white; box-shadow: 0 28px 80px rgba(9, 27, 31, .24); }
+.dialog-card { overflow: hidden auto; overscroll-behavior: contain; width: min(760px, 100%); max-height: min(880px, calc(100vh - 48px)); border: 1px solid var(--line); border-radius: 12px; background: white; box-shadow: 0 28px 80px rgba(9, 27, 31, .24); }
 .dialog-head { display: flex; padding: 21px 22px 17px; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .dialog-head h2 { margin-bottom: 6px; font-size: 1.35rem; }.dialog-head p:last-child { margin: 0; color: var(--muted); }
 .dialog-card form { display: grid; gap: 16px; padding: 20px 22px 22px; }

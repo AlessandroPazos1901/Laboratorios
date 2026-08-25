@@ -212,6 +212,18 @@ function todayInLima() {
   }).format(new Date());
 }
 
+/**
+ * Hoy o ayer: la ventana en la que la edad todavía puede caer por debajo de las
+ * 24 horas, que es lo único que la hora cambia en el informe. Atado solo a «hoy»
+ * no había dónde anotar la hora de un bebé nacido anoche a las 23:40 y
+ * muestreado a las 06:00 — seis horas de vida que se informaban como «1 día».
+ */
+function isNewborn(birthDate: string) {
+  if (!birthDate) return false;
+  const days = (Date.parse(`${todayInLima()}T00:00:00`) - Date.parse(`${birthDate.slice(0, 10)}T00:00:00`)) / 86_400_000;
+  return days === 0 || days === 1;
+}
+
 function PageHead({ eyebrow, title, text, action, compact = false }: { eyebrow: string; title: string; text: string; action?: React.ReactNode; compact?: boolean }) {
   return <div className={compact ? "page-head compact" : "page-head"}><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{text}</p></div>{action}</div>;
 }
@@ -293,7 +305,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   // Solo para recién nacidos: con la hora, la edad se informa en horas en vez de
   // «0 días», que en un neonato no dice nada.
   const [newbornTime, setNewbornTime] = useState("");
-  const newbornToday = birthDate !== "" && birthDate === todayInLima();
+  const newborn = isNewborn(birthDate);
   const [sex, setSex] = useState<"F" | "M" | "X" | "">("");
   const [occurredAt, setOccurredAt] = useState(initialOccurredAt);
   const activeAnalysts = analysts.filter((analyst) => analyst.active);
@@ -335,9 +347,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
         const exact = /^\d{8}$/.test(exactDni) ? matches.find((patient) => patient.documentNumber === exactDni) : null;
         if (exact) {
           setDirectoryPatient(exact);
-          setName(exact.fullName);
-          setBirthDate(exact.birthDate);
-          setSex(exact.sex === "U" ? "" : exact.sex);
+          adoptPatient(exact);
         }
       }).catch(() => {
         if (!cancelled) setDirectoryMatches([]);
@@ -378,6 +388,18 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
     });
   }
 
+  /**
+   * Vuelca los datos maestros del paciente en el formulario. La hora de
+   * nacimiento va aquí junto a los demás campos: si se copia el resto pero no
+   * ella, el segundo análisis de un recién nacido sale sin hora.
+   */
+  function adoptPatient(patient: LabData["patients"][number]) {
+    setName(patient.fullName);
+    setBirthDate(patient.birthDate);
+    setNewbornTime(patient.birthTime ?? "");
+    setSex(patient.sex === "U" ? "" : patient.sex);
+  }
+
   function changeDni(rawValue: string) {
     const normalized = rawValue.replace(/\D/g, "").slice(0, 8);
     const matched = patients.find((patient) => patient.documentNumber === normalized);
@@ -386,13 +408,12 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
     setPatientError("");
     if (matched) {
       setDirectoryPatient(null);
-      setName(matched.fullName);
-      setBirthDate(matched.birthDate);
-      setSex(matched.sex === "U" ? "" : matched.sex);
+      adoptPatient(matched);
     } else if (existing && existing.documentNumber !== normalized) {
       setDirectoryPatient(null);
       setName("");
       setBirthDate("");
+      setNewbornTime("");
       setSex("");
     }
   }
@@ -401,9 +422,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
     setDirectoryPatient(patient);
     setPatientQuery(`${patient.fullName} · ${patient.documentNumber}`);
     setDni(patient.documentNumber);
-    setName(patient.fullName);
-    setBirthDate(patient.birthDate);
-    setSex(patient.sex === "U" ? "" : patient.sex);
+    adoptPatient(patient);
     setPatientError("");
   }
 
@@ -426,7 +445,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           documentNumber: dni,
           fullName: (existing?.fullName ?? name).trim(),
           birthDate,
-          birthTime: newbornToday && newbornTime ? newbornTime : undefined,
+          birthTime: newborn && newbornTime ? newbornTime : undefined,
           sex: sex as "F" | "M" | "X",
         });
         setPatientId(saved.id);
@@ -436,7 +455,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
           patient_name: (existing?.fullName ?? name).trim(),
           patient_birth_date: birthDate,
           patient_sex: sex,
-          patient_birth_time: newbornToday && newbornTime ? newbornTime : null,
+          patient_birth_time: newborn && newbornTime ? newbornTime : null,
         });
         if (patientResult.error) throw patientResult.error;
         const savedPatientId = (patientResult.data as { id: number } | null)?.id;
@@ -523,7 +542,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
             <label>Nombre completo<input value={existing?.fullName ?? name} disabled={Boolean(existing)} onChange={(event) => setName(event.target.value.replace(/[0-9]/g, ""))} placeholder="Nombres y apellidos" /></label>
             <label>Sexo<select value={sex} onChange={(event) => setSex(event.target.value as typeof sex)}><option value="">Seleccionar</option><option value="F">Femenino</option><option value="M">Masculino</option><option value="X">Otro</option></select></label>
             <label>Fecha de nacimiento<input type="date" max={occurredAt.slice(0, 10)} value={birthDate} onChange={(event) => setBirthDate(event.target.value)} /></label>
-            {newbornToday && <label>Hora de nacimiento<input type="time" value={newbornTime} onChange={(event) => setNewbornTime(event.target.value)} /><small className="field-hint">Recién nacido: con la hora, el informe da la edad en horas.</small></label>}
+            {newborn && <label>Hora de nacimiento<input type="time" value={newbornTime} onChange={(event) => setNewbornTime(event.target.value)} /><small className="field-hint">Recién nacido: con la hora, el informe da la edad en horas.</small></label>}
             <label>Fecha del análisis<div className="input-with-icon"><CalendarDays /><input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></div></label>
             <label className="analyst-field"><span><UserRound />Realizado por</span><select value={analystId} onChange={(event) => setAnalystId(event.target.value)} required><option value="">Seleccionar analista…</option>{activeAnalysts.map((analyst) => <option value={analyst.id} key={analyst.id}>{analyst.fullName}</option>)}</select>{activeAnalysts.length === 0 && <small>No hay analistas activos. Agrégalos en Configuración.</small>}</label>
           </div>
@@ -1138,7 +1157,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
   const [name, setName] = useState(patient.fullName);
   const [birthDate, setBirthDate] = useState(patient.birthDate);
   const [newbornTime, setNewbornTime] = useState(patient.birthTime ?? "");
-  const newbornToday = birthDate !== "" && birthDate === todayInLima();
+  const newborn = isNewborn(birthDate);
   const [sex, setSex] = useState<"F" | "M" | "X" | "">(patient.sex === "U" ? "" : patient.sex);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1158,7 +1177,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
           patient,
           fullName: name.trim(),
           birthDate,
-          birthTime: newbornToday && newbornTime ? newbornTime : undefined,
+          birthTime: newborn && newbornTime ? newbornTime : undefined,
           sex,
         });
       } else {
@@ -1167,7 +1186,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
           patient_name: name.trim(),
           patient_birth_date: birthDate,
           patient_sex: sex,
-          patient_birth_time: newbornToday && newbornTime ? newbornTime : null,
+          patient_birth_time: newborn && newbornTime ? newbornTime : null,
         });
         if (response.error) throw response.error;
       }
@@ -1188,7 +1207,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
         <label>Nombre completo<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label>
         <div className="dialog-fields">
           <label>Sexo<select value={sex} onChange={(event) => setSex(event.target.value as typeof sex)}><option value="">Seleccionar</option><option value="F">Femenino</option><option value="M">Masculino</option><option value="X">Otro</option></select></label>
-          {newbornToday && <label>Hora de nacimiento<input type="time" value={newbornTime} onChange={(event) => setNewbornTime(event.target.value)} /><small className="field-hint">Recién nacido: con la hora, el informe da la edad en horas.</small></label>}
+          {newborn && <label>Hora de nacimiento<input type="time" value={newbornTime} onChange={(event) => setNewbornTime(event.target.value)} /><small className="field-hint">Recién nacido: con la hora, el informe da la edad en horas.</small></label>}
           <label>Fecha de nacimiento<input type="date" max={new Date().toISOString().slice(0, 10)} value={birthDate} onChange={(event) => setBirthDate(event.target.value)} /></label>
         </div>
         {error && <p className="form-error" role="alert">{error}</p>}
