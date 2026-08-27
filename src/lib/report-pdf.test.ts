@@ -80,6 +80,10 @@ describe("tamaño de hoja", () => {
       // la última fila de la tabla quedaría escrita encima.
       expect(geo.footerBaseline).toBeGreaterThan(8);
       expect(geo.footerBaseline + 8.5).toBeLessThanOrEqual(geo.bottomReserve);
+      // La fila tiene que seguir siendo más alta que su interlineado, o dos
+      // líneas seguidas se escribirían una encima de otra.
+      expect(geo.rowMin).toBeGreaterThan(geo.rowLine);
+      expect(geo.font(8.5)).toBeGreaterThanOrEqual(5);
       // Arriba solo puede recortarse aire, nunca hasta el borde imprimible.
       expect(geo.topMargin).toBeGreaterThanOrEqual(14);
       expect(geo.topMargin).toBeLessThanOrEqual(geo.margin);

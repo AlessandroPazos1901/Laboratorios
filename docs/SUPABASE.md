@@ -116,6 +116,21 @@ Ejecutar en orden:
     `apply_offline_operation` transporta `birthTime` en el payload y lo compara
     al detectar conflictos de demografía. Aplicada el 2026-08-22.
 
+17. `202608270001_clear_method_sample_reference_label.sql`: vacía la etiqueta
+    «Según método y muestra» en `analysis_versions.reference_ranges` (76
+    versiones), porque el laboratorio no quiere verla impresa en el informe del
+    paciente. Deja `[{"label": ""}]` y no `[]`, ya que con el array vacío
+    `referenceLabel()` imprime «Por definir». Ninguna de las filas afectadas
+    llevaba `low`/`high`, así que no se pierde ningún límite numérico y no se
+    desactiva ningún análisis. Los `clinical_snapshot` ya emitidos no se tocan:
+    un informe histórico no cambia porque el catálogo cambie hoy.
+    Aplicada el 2026-08-27.
+
+18. `202608270002_clear_method_reference_label.sql`: lo mismo para la etiqueta
+    «Según método» (10 versiones, todas de análisis numéricos y sin `low`/`high`).
+    Esas cifras pasan a imprimirse sin intervalo de referencia al lado, por
+    decisión del laboratorio. Aplicada el 2026-08-27.
+
 Las RPC del flujo principal incluyen `search_patients`,
 `upsert_simple_patient`, `upsert_patient_with_demographics`,
 `update_patient_details`, `register_daily_analyses`,

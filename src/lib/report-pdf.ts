@@ -58,6 +58,16 @@ const VERTICAL_OVERRIDES: Partial<Record<ReportPageSize, Partial<typeof VERTICAL
   a5: { topMargin: 14, logoGap: 3, cardHeight: 47, cardGap: 6, bottomReserve: 32 },
 };
 
+/**
+ * Puntos que se restan a la letra del informe en cada tamaño de hoja. El alto de
+ * fila baja lo mismo: encoger solo la letra dejaría el informe idéntico de
+ * páginas, porque quien pagina es `ROW_MIN`, no el cuerpo del texto.
+ *
+ * El pie queda fuera a propósito: se agrandó a 8.5pt para que el paciente lo lea.
+ * Este es el mando para calibrar A5 contra la impresora real del laboratorio.
+ */
+const FONT_DELTA: Partial<Record<ReportPageSize, number>> = { a5: -1 };
+
 export type ReportGeometry = {
   width: number;
   height: number;
@@ -71,6 +81,10 @@ export type ReportGeometry = {
   cardGap: number;
   bottomReserve: number;
   footerBaseline: number;
+  /** Tamaño de letra del informe (todo menos el pie), ya con el ajuste aplicado. */
+  font: (base: number) => number;
+  rowLine: number;
+  rowMin: number;
 };
 
 export function reportGeometry(size: ReportPageSize = DEFAULT_REPORT_PAGE_SIZE): ReportGeometry {
@@ -80,6 +94,7 @@ export function reportGeometry(size: ReportPageSize = DEFAULT_REPORT_PAGE_SIZE):
   const margin = Math.max(28, (width * 42) / 612);
   const contentWidth = width - margin * 2;
   const vertical = { ...VERTICAL_DEFAULTS, ...VERTICAL_OVERRIDES[size] };
+  const fontDelta = FONT_DELTA[size] ?? 0;
   return {
     width,
     height,
@@ -95,6 +110,10 @@ export function reportGeometry(size: ReportPageSize = DEFAULT_REPORT_PAGE_SIZE):
     // El pie manda sobre la reserva inferior: si crece la letra, la última fila
     // de la tabla se aparta sola en vez de quedar pisada.
     footerBaseline: vertical.bottomReserve - FOOTER_SIZE - 1,
+    // Piso de 5pt: por debajo de eso ningún informe clínico es legible impreso.
+    font: (base: number) => Math.max(5, base + fontDelta),
+    rowLine: ROW_LINE + fontDelta,
+    rowMin: ROW_MIN + fontDelta,
   };
 }
 
@@ -249,14 +268,15 @@ function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, b
   const leftValue = geo.margin + geo.contentWidth * (90 / 528);
   const rightLabel = geo.margin + geo.contentWidth * (365 / 528);
   const rightValue = geo.margin + geo.contentWidth * (419 / 528);
+  const card = geo.font(8.5);
   rows.forEach((row, index) => {
     const y = top - 14 - index * 15;
-    page.drawText(row[0], { x: leftLabel, y, size: 8.5, font: bold, color: INK });
-    page.drawText(":", { x: leftValue - 12, y, size: 8.5, font: bold, color: INK });
-    page.drawText(fitText(row[1], regular, 8.5, rightLabel - leftValue - 8), { x: leftValue, y, size: 8.5, font: regular, color: INK });
-    page.drawText(row[2], { x: rightLabel, y, size: 8.5, font: bold, color: INK });
-    page.drawText(":", { x: rightValue - 12, y, size: 8.5, font: bold, color: INK });
-    page.drawText(fitText(row[3], regular, 8.5, geo.margin + geo.contentWidth - rightValue - 8), { x: rightValue, y, size: 8.5, font: regular, color: INK });
+    page.drawText(row[0], { x: leftLabel, y, size: card, font: bold, color: INK });
+    page.drawText(":", { x: leftValue - 12, y, size: card, font: bold, color: INK });
+    page.drawText(fitText(row[1], regular, card, rightLabel - leftValue - 8), { x: leftValue, y, size: card, font: regular, color: INK });
+    page.drawText(row[2], { x: rightLabel, y, size: card, font: bold, color: INK });
+    page.drawText(":", { x: rightValue - 12, y, size: card, font: bold, color: INK });
+    page.drawText(fitText(row[3], regular, card, geo.margin + geo.contentWidth - rightValue - 8), { x: rightValue, y, size: card, font: regular, color: INK });
   });
 }
 
@@ -272,9 +292,9 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
 
   const title = clean(`${reportGroupTitle(group)}${continuation ? " - CONTINUACION" : ""}`).toUpperCase();
   page.drawText(title, {
-    x: geo.margin + (geo.contentWidth - bold.widthOfTextAtSize(title, 9.5)) / 2,
+    x: geo.margin + (geo.contentWidth - bold.widthOfTextAtSize(title, geo.font(9.5))) / 2,
     y: top - 13,
-    size: 9.5,
+    size: geo.font(9.5),
     font: bold,
     color: INK,
   });
@@ -284,11 +304,11 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
   headers.forEach((label, index) => {
     const left = geo.columns[index];
     const width = geo.columns[index + 1] - left;
-    const text = fitText(label, bold, 8, width - 4);
+    const text = fitText(label, bold, geo.font(8), width - 4);
     page.drawText(text, {
-      x: left + (width - bold.widthOfTextAtSize(text, 8)) / 2,
+      x: left + (width - bold.widthOfTextAtSize(text, geo.font(8))) / 2,
       y: bottom + 5,
-      size: 8,
+      size: geo.font(8),
       font: bold,
       color: INK,
     });
@@ -298,46 +318,46 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
 
 function resultRowLines(row: Extract<LabReportTableRow, { kind: "result" }>, regular: PDFFont, bold: PDFFont, analysisX: number, geo: ReportGeometry) {
   return {
-    analysis: splitText(row.result.analysis, regular, 8.5, geo.columns[1] - analysisX - 5),
-    result: splitText(formatNumericResult(row.result.value, row.result.unit) || "-", bold, 8.5, geo.columns[2] - geo.columns[1] - 8),
-    unit: splitText(formatReportUnit(row.result.unit), regular, 8, geo.columns[3] - geo.columns[2] - 8),
-    reference: splitText(formatReportReference(row.result.reference, row.result.unit), regular, 8, geo.columns[4] - geo.columns[3] - 8),
+    analysis: splitText(row.result.analysis, regular, geo.font(8.5), geo.columns[1] - analysisX - 5),
+    result: splitText(formatNumericResult(row.result.value, row.result.unit) || "-", bold, geo.font(8.5), geo.columns[2] - geo.columns[1] - 8),
+    unit: splitText(formatReportUnit(row.result.unit), regular, geo.font(8), geo.columns[3] - geo.columns[2] - 8),
+    reference: splitText(formatReportReference(row.result.reference, row.result.unit), regular, geo.font(8), geo.columns[4] - geo.columns[3] - 8),
   };
 }
 
 function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont, geo: ReportGeometry) {
   if (row.kind === "title") {
-    const lines = splitText(row.label, bold, 9, geo.contentWidth - 12);
-    return Math.max(ROW_MIN + 1, lines.length * ROW_LINE + 7);
+    const lines = splitText(row.label, bold, geo.font(9), geo.contentWidth - 12);
+    return Math.max(geo.rowMin + 1, lines.length * geo.rowLine + 7);
   }
   if (row.kind === "section") {
-    const lines = splitText(row.label, bold, 8.5, geo.contentWidth - 12);
-    return Math.max(ROW_MIN, lines.length * ROW_LINE + 6);
+    const lines = splitText(row.label, bold, geo.font(8.5), geo.contentWidth - 12);
+    return Math.max(geo.rowMin, lines.length * geo.rowLine + 6);
   }
   const lines = resultRowLines(row, regular, bold, geo.margin + 5 + row.indent * 13, geo);
   const tallest = Math.max(lines.analysis.length, lines.result.length, lines.unit.length, lines.reference.length);
-  return Math.max(ROW_MIN, tallest * ROW_LINE + 6);
+  return Math.max(geo.rowMin, tallest * geo.rowLine + 6);
 }
 
 function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height: number, regular: PDFFont, bold: PDFFont, geo: ReportGeometry) {
   const bottom = top - height;
   if (row.kind === "title") {
-    drawLines(page, splitText(row.label, bold, 9, geo.contentWidth - 12), geo.margin + 6, top - 11, bold, 9, INK, ROW_LINE);
+    drawLines(page, splitText(row.label, bold, geo.font(9), geo.contentWidth - 12), geo.margin + 6, top - 11, bold, geo.font(9), INK, geo.rowLine);
     return bottom;
   }
   if (row.kind === "section") {
     page.drawRectangle({ x: geo.margin, y: bottom, width: geo.contentWidth, height, color: SECTION_HEADER });
-    drawLines(page, splitText(row.label, bold, 8.5, geo.contentWidth - 12), geo.margin + 6, top - 11, bold, 8.5, INK, ROW_LINE);
+    drawLines(page, splitText(row.label, bold, geo.font(8.5), geo.contentWidth - 12), geo.margin + 6, top - 11, bold, geo.font(8.5), INK, geo.rowLine);
     return bottom;
   }
 
   const baseline = top - 11;
   const analysisX = geo.margin + 5 + row.indent * 13;
   const lines = resultRowLines(row, regular, bold, analysisX, geo);
-  drawLines(page, lines.analysis, analysisX, baseline, regular, 8.5, INK, ROW_LINE);
-  drawCenteredLines(page, lines.result, geo.columns[1], geo.columns[2], baseline, bold, 8.5, row.result.flag === "critical" ? CRITICAL : INK, ROW_LINE);
-  drawCenteredLines(page, lines.unit, geo.columns[2], geo.columns[3], baseline, regular, 8, INK, ROW_LINE);
-  drawCenteredLines(page, lines.reference, geo.columns[3], geo.columns[4], baseline, regular, 8, INK, ROW_LINE);
+  drawLines(page, lines.analysis, analysisX, baseline, regular, geo.font(8.5), INK, geo.rowLine);
+  drawCenteredLines(page, lines.result, geo.columns[1], geo.columns[2], baseline, bold, geo.font(8.5), row.result.flag === "critical" ? CRITICAL : INK, geo.rowLine);
+  drawCenteredLines(page, lines.unit, geo.columns[2], geo.columns[3], baseline, regular, geo.font(8), INK, geo.rowLine);
+  drawCenteredLines(page, lines.reference, geo.columns[3], geo.columns[4], baseline, regular, geo.font(8), INK, geo.rowLine);
   return bottom;
 }
 
