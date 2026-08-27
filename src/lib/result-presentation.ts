@@ -261,15 +261,21 @@ export function matchChoiceOption(options: string[], value: string) {
  * el catálogo aprobó para ese análisis: pasarse era `numeric_precision_exceeded`
  * al guardar, con toda la tanda ya escrita.
  */
-export function sanitizeResultInput(type: "numeric" | "qualitative" | "text", rawValue: string, decimals?: number) {
+export function sanitizeResultInput(type: "numeric" | "qualitative" | "text", rawValue: string, decimals?: number, analysisCode?: string) {
   if (type !== "numeric") return rawValue;
   const normalized = rawValue.replace(",", ".").replace(/[^0-9.-]/g, "");
   const negative = normalized.startsWith("-");
   const unsigned = normalized.replace(/-/g, "");
   const [whole, ...rest] = unsigned.split(".");
   const fraction = rest.join("");
-  const limited = typeof decimals === "number" && decimals >= 0 ? fraction.slice(0, decimals) : fraction;
-  // `decimals: 0` significa entero: el punto tampoco se queda escrito.
-  const separator = rest.length && limited === "" && decimals === 0 ? "" : rest.length ? "." : "";
+  // `decimals` es del valor GUARDADO. Leucocitos y plaquetas se teclean en miles
+  // y se guardan multiplicados por 1000, así que en la casilla caben tres
+  // decimales más: con `decimals: 0` a secas no se podía escribir «8.35».
+  const allowed = typeof decimals === "number" && decimals >= 0
+    ? decimals + (usesThousandsEntry(analysisCode) ? 3 : 0)
+    : undefined;
+  const limited = allowed === undefined ? fraction : fraction.slice(0, allowed);
+  // Solo un entero de verdad se queda sin punto.
+  const separator = rest.length && limited === "" && allowed === 0 ? "" : rest.length ? "." : "";
   return `${negative ? "-" : ""}${whole}${separator}${limited}`;
 }

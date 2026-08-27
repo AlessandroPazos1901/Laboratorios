@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchChoiceOption, sanitizeResultInput } from "./result-presentation";
+import { matchChoiceOption, resultStorageValue, sanitizeResultInput } from "./result-presentation";
 
 describe("validación de lo que se teclea en un resultado", () => {
   it("un campo numérico no deja escribir ni una letra", () => {
@@ -15,6 +15,18 @@ describe("validación de lo que se teclea en un resultado", () => {
     expect(sanitizeResultInput("numeric", "1.239", 2)).toBe("1.23");
     expect(sanitizeResultInput("numeric", "1.239", 0)).toBe("1");
     expect(sanitizeResultInput("numeric", "1.239")).toBe("1.239");
+  });
+
+  it("deja escribir decimales donde la casilla se teclea en miles", () => {
+    // HEM-WBC guarda enteros (/µL) pero se teclea en 10³/µL: «8.35» son 8350.
+    expect(sanitizeResultInput("numeric", "8.35", 0, "HEM-WBC")).toBe("8.35");
+    expect(sanitizeResultInput("numeric", "8.", 0, "HEM-WBC")).toBe("8.");
+    expect(resultStorageValue(sanitizeResultInput("numeric", "8.35", 0, "HEM-WBC"), "HEM-WBC")).toBe("8350");
+    expect(sanitizeResultInput("numeric", "250.5", 0, "HEM-PLT")).toBe("250.5");
+    // El cuarto decimal ya no cabe: guardado sería 8356.7, y el catálogo pide entero.
+    expect(sanitizeResultInput("numeric", "8.3567", 0, "HEM-WBC")).toBe("8.356");
+    // Un análisis normal con decimals 0 sigue sin admitir punto.
+    expect(sanitizeResultInput("numeric", "8.35", 0, "BIO-GLU")).toBe("8");
   });
 
   it("no toca los campos de texto ni los de lista", () => {

@@ -440,7 +440,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   }, [offlineRepository, patientQuery]);
 
   function changeAnalysisResult(analysis: AnalysisDefinition, rawValue: string) {
-    const sanitized = sanitizeResultInput(analysis.resultType, rawValue, analysis.decimals);
+    const sanitized = sanitizeResultInput(analysis.resultType, rawValue, analysis.decimals, analysis.code);
     setResultValues((current) => {
       const next = { ...current, [analysis.versionId]: sanitized };
       const linked = analysis.resultType === "numeric"
@@ -817,7 +817,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
     setDraft((results) => {
       const source = results.find((result) => result.id === id);
       if (!source) return results;
-      const entryValue = sanitizeResultInput(source.resultType, value);
+      const entryValue = sanitizeResultInput(source.resultType, value, undefined, source.analysisCode);
       const sanitized = source.resultType === "numeric"
         ? resultStorageValue(entryValue, source.analysisCode)
         : entryValue;
@@ -865,7 +865,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
   }
 
   function changeEditingResult(result: ResultValue, value: string) {
-    const sanitized = sanitizeResultInput(result.resultType, value);
+    const sanitized = sanitizeResultInput(result.resultType, value, undefined, result.analysisCode);
     setEditingValue(sanitized);
     changeResult(result.id, sanitized);
   }
