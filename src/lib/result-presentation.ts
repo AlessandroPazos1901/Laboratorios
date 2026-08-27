@@ -235,3 +235,41 @@ export function formatDisplayReference(reference: string, unit: string) {
     : reference;
   return stripUnits(expanded, [unit, formatDisplayUnit(unit)]);
 }
+
+/** Compara ignorando mayúsculas, tildes y espacios de más. */
+export const looseKey = (value: string) => value
+  .normalize("NFD").replace(/\p{Diacritic}/gu, "").trim().toLocaleLowerCase("es").replace(/\s+/g, " ");
+
+/**
+ * La opción de la lista que corresponde a lo tecleado, o `null` si no hay
+ * ninguna. La base exige coincidencia exacta (`qualitative_option_not_allowed`),
+ * así que «positivo» tecleado en minúscula tiene que volverse «POSITIVO» aquí y
+ * no llegar al servidor tal cual para que lo rechace sin explicación.
+ */
+export function matchChoiceOption(options: string[], value: string) {
+  const typed = value.trim();
+  if (!typed) return "";
+  const exact = options.find((option) => option === typed);
+  if (exact) return exact;
+  const loose = options.filter((option) => looseKey(option) === looseKey(typed));
+  return loose.length === 1 ? loose[0] : null;
+}
+
+/**
+ * Lo que se teclea en un resultado, filtrado antes de llegar al estado. Un campo
+ * numérico no admite ni una letra, y no deja escribir más decimales de los que
+ * el catálogo aprobó para ese análisis: pasarse era `numeric_precision_exceeded`
+ * al guardar, con toda la tanda ya escrita.
+ */
+export function sanitizeResultInput(type: "numeric" | "qualitative" | "text", rawValue: string, decimals?: number) {
+  if (type !== "numeric") return rawValue;
+  const normalized = rawValue.replace(",", ".").replace(/[^0-9.-]/g, "");
+  const negative = normalized.startsWith("-");
+  const unsigned = normalized.replace(/-/g, "");
+  const [whole, ...rest] = unsigned.split(".");
+  const fraction = rest.join("");
+  const limited = typeof decimals === "number" && decimals >= 0 ? fraction.slice(0, decimals) : fraction;
+  // `decimals: 0` significa entero: el punto tampoco se queda escrito.
+  const separator = rest.length && limited === "" && decimals === 0 ? "" : rest.length ? "." : "";
+  return `${negative ? "-" : ""}${whole}${separator}${limited}`;
+}

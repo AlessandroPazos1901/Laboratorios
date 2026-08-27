@@ -82,6 +82,7 @@ small { font-size: .82rem; line-height: 1.4; }
 .password-field input { width: 100%; padding-right: 45px; }
 .password-field .icon-button { position: absolute; top: 2px; right: 2px; }
 .form-error { margin: -10px 0; padding: 10px 12px; border-left: 3px solid var(--red); color: var(--red); background: #fff1f1; }
+.searchable-result small.choice-rejected { color: var(--red); font-weight: 700; }
 .login-help { margin: 2px 0 0; color: #53606c; text-align: center; font-size: .92rem; }
 .login-recovery { margin-top: -14px; justify-self: end; font-size: .9rem; }
 /* Lo único que distingue la pantalla de ingreso con internet de la de sin él. */

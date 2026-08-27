@@ -13,7 +13,8 @@ import { analysisBelongsToCatalogGroup, buildCatalogGroupOptions, catalogSubsect
 import { biochemistryFormulaKey, birthMoment, flagNumericResult, formatNumericResult, formatPatientAgeAt, groupResultsByBatch, isCalculatedAnalysisResult, linkedBiochemistryValues, linkedHematologyValues, resultFlagFor, type BiochemistryFormulaKey } from "@/lib/clinical";
 import {
   buildResultPresentationRows, displayResultNumber, entryFullFigure, formatDisplayReference, formatDisplayUnit,
-  formatResultReference, formatResultUnit, resultEntryValue, resultStorageValue,
+  formatResultReference, formatResultUnit, matchChoiceOption, resultEntryValue, resultStorageValue,
+  sanitizeResultInput,
 } from "@/lib/result-presentation";
 import {
   ageColumns, AGE_BRACKETS, analysisKey, buildCountMatrix, countSheet, dayColumns, detailSheet,
@@ -237,28 +238,81 @@ function PageHead({ eyebrow, title, text, action, compact = false }: { eyebrow: 
   return <div className={compact ? "page-head compact" : "page-head"}><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{text}</p></div>{action}</div>;
 }
 
+/**
+ * Cada aviso que puede llegar de la base, dicho en castellano llano y con la
+ * acción que resuelve el problema. El orden importa: las claves más específicas
+ * van antes que las que son prefijo de otra (`analyst_required` antes que
+ * `analyses_required` no colisiona, pero `numeric_value_required` sí quedaría
+ * tapado por una búsqueda de `value_required`).
+ *
+ * La lista sale de leer las funciones que escriben resultados en Supabase:
+ * `register_daily_analyses`, `register_daily_analyses_core` y
+ * `save_result_draft`. Si se agrega un `raise exception` allá, se agrega aquí.
+ */
+const RPC_MESSAGES: [string, string][] = [
+  // Registro de la tanda diaria.
+  ["analyst_inactive_or_missing", "El analista que elegiste ya no figura como activo. Elige otro en la lista."],
+  ["analyst_required", "Falta indicar quién realizó el análisis. Elige un analista de la lista."],
+  ["analyses_required", "No hay ningún resultado escrito. Escribe al menos uno: los campos vacíos no se guardan."],
+  ["duplicate_analysis_version", "Hay un análisis repetido en la lista. Deja solo una fila por análisis."],
+  ["invalid_or_inactive_analysis_version", "Uno de los análisis elegidos ya no está disponible para registrar: está desactivado en el Catálogo, o su versión todavía no fue aprobada."],
+  ["invalid_order_date", "La fecha del registro está en el futuro. Corrige la fecha y vuelve a guardar."],
+  ["invalid_result_entries", "Los resultados llegaron con un formato que el sistema no entiende. Recarga la página y vuelve a escribirlos."],
+  ["patient_not_found", "Ese paciente ya no existe en la base. Búscalo de nuevo o vuelve a registrarlo."],
+  ["analysis_not_in_order", "El análisis no quedó asociado al registro del día. Recarga la página y vuelve a intentarlo."],
+  // Guardado de cada resultado.
+  ["result_context_not_found", "El registro que intentas guardar ya no existe. Recarga la página."],
+  ["revision_locked", "Este informe ya fue cerrado. Para cambiarlo hay que emitir una corrección."],
+  ["concurrent_change", "Otra persona modificó este registro mientras lo editabas. Recarga la página para ver lo último."],
+  ["numeric_precision_exceeded", "El resultado tiene más decimales de los que admite ese análisis. Redondéalo."],
+  ["numeric_value_required", "Ese análisis espera un número y se envió texto. Escribe solo la cifra."],
+  ["qualitative_option_not_allowed", "El resultado escrito no es una de las opciones válidas de ese análisis. Elígelo de la lista."],
+  ["qualitative_value_required", "Falta elegir el resultado de un análisis de lista."],
+  ["text_value_required", "Falta escribir el resultado de un análisis de texto."],
+  ["not_authorized", "Tu sesión ya no tiene permiso para guardar. Cierra sesión y vuelve a entrar."],
+  ["missing_revision", "No se encontró la revisión activa. Recarga la página."],
+  // Pacientes.
+  ["invalid_dni", "El DNI debe tener exactamente 8 dígitos."],
+  ["patient_name_required", "Ingresa el nombre completo del paciente."],
+  ["invalid_birth_date", "La fecha y hora de nacimiento no es válida."],
+  ["invalid_patient_sex", "Selecciona el sexo del paciente."],
+  // Impresión y catálogo.
+  ["all_batch_results_required", "Completa todos los resultados de esta tanda antes de imprimir."],
+  ["all_group_results_required", "Completa todos los resultados de este grupo antes de imprimir."],
+  ["all_results_required", "Completa todos los resultados antes de imprimir."],
+  ["reason_required", "Escribe un motivo de al menos 5 caracteres."],
+  ["reference_range_required", "Define al menos un intervalo de referencia antes de activar el análisis."],
+  ["qualitative_options_required", "Agrega las opciones válidas del resultado cualitativo."],
+  ["sample_type_required", "Indica el tipo de muestra."],
+  ["owner_required", "Solo una cuenta administradora puede aprobar el catálogo."],
+  // La función no existe en la base: falta correr una migración.
+  ["register_daily_analyses", "El sistema necesita una actualización. Comunícate con el administrador."],
+  ["update_patient_details", "El sistema necesita una actualización. Comunícate con el administrador."],
+];
+
 function rpcMessage(message: string) {
-  if (message.includes("register_daily_analyses")) return "El sistema necesita una actualización. Comunícate con el administrador.";
-  if (message.includes("invalid_dni")) return "El DNI debe tener exactamente 8 dígitos.";
-  if (message.includes("patient_name_required")) return "Ingresa el nombre completo del paciente.";
-  if (message.includes("analyses_required")) return "Selecciona al menos un análisis.";
-  if (message.includes("analyst_required")) return "Selecciona quién realizó el análisis.";
-  if (message.includes("analyst_inactive_or_missing")) return "El analista seleccionado ya no está activo. Elige otro.";
-  if (message.includes("numeric_precision_exceeded")) return "El resultado tiene más decimales de los permitidos para ese análisis.";
-  if (message.includes("concurrent_change")) return "Otro usuario modificó este registro. Recarga para continuar.";
-  if (message.includes("missing_revision")) return "No se encontró la revisión activa. Recarga la página.";
-  if (message.includes("all_results_required")) return "Completa todos los resultados antes de imprimir.";
-  if (message.includes("all_group_results_required")) return "Completa todos los resultados de este grupo antes de imprimir.";
-  if (message.includes("all_batch_results_required")) return "Completa todos los resultados de esta tanda antes de imprimir.";
-  if (message.includes("reason_required")) return "Escribe un motivo de al menos 5 caracteres.";
-  if (message.includes("reference_range_required")) return "Define al menos un intervalo de referencia antes de activar el análisis.";
-  if (message.includes("qualitative_options_required")) return "Agrega las opciones válidas del resultado cualitativo.";
-  if (message.includes("sample_type_required")) return "Indica el tipo de muestra.";
-  if (message.includes("invalid_birth_date")) return "La fecha y hora de nacimiento no es válida.";
-  if (message.includes("invalid_patient_sex")) return "Selecciona el sexo del paciente.";
-  if (message.includes("update_patient_details")) return "El sistema necesita una actualización. Comunícate con el administrador.";
-  if (message.includes("owner_required")) return "Solo una cuenta administradora puede aprobar el catálogo.";
-  return "No se pudo completar la operación. Intenta nuevamente.";
+  const known = RPC_MESSAGES.find(([code]) => message.includes(code));
+  if (known) return known[1];
+  // Nunca dejar al usuario delante de un «no se pudo» sin nada más. El texto
+  // crudo no explica, pero es lo único que permite que alguien lo resuelva.
+  const detail = message.trim().slice(0, 200);
+  return detail
+    ? `No se pudo guardar. El sistema respondió: «${detail}». Toma una captura de este aviso y envíasela al administrador.`
+    : "No se pudo guardar y el sistema no dio ningún motivo. Revisa tu conexión y vuelve a intentarlo.";
+}
+
+/**
+ * Un fallo de Supabase trae el motivo repartido en cuatro campos y `message`
+ * suele ser el menos explícito. Juntarlos es lo que evita que un error sin
+ * traducir llegue a pantalla como un «no se pudo» vacío.
+ */
+function errorText(reason: unknown, fallback: string) {
+  if (typeof reason === "string") return reason;
+  if (!reason || typeof reason !== "object") return fallback;
+  const parts = ["message", "details", "hint", "code"]
+    .map((key) => (reason as Record<string, unknown>)[key])
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return parts.length ? [...new Set(parts)].join(" · ") : fallback;
 }
 
 function ResultChoiceField({ id, value, options, disabled, className, label, onChange }: {
@@ -270,6 +324,8 @@ function ResultChoiceField({ id, value, options, disabled, className, label, onC
   label: string;
   onChange: (value: string) => void;
 }) {
+  const [rejected, setRejected] = useState("");
+
   if (options.length < 8) {
     return <select id={id} className={className} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} aria-label={label}>
       <option value="">Seleccionar...</option>
@@ -277,29 +333,44 @@ function ResultChoiceField({ id, value, options, disabled, className, label, onC
     </select>;
   }
 
+  // Con muchas opciones hace falta poder teclear para buscar, pero al salir del
+  // campo solo puede quedar una opción de la lista: lo demás se descarta en el
+  // momento, en vez de fallar al guardar toda la tanda.
+  const settle = (typed: string) => {
+    const matched = matchChoiceOption(options, typed);
+    if (matched === null) {
+      setRejected(typed);
+      onChange("");
+      return;
+    }
+    setRejected("");
+    if (matched !== typed) onChange(matched);
+  };
+
   const listId = `result-options-${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return <span className="searchable-result">
-    <input id={id} className={className} list={listId} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder="Escribe para buscar..." aria-label={label} autoComplete="off" />
+    <input
+      id={id}
+      className={className}
+      list={listId}
+      value={value}
+      disabled={disabled}
+      onChange={(event) => { setRejected(""); onChange(event.target.value); }}
+      onBlur={(event) => settle(event.target.value)}
+      placeholder="Escribe para buscar..."
+      aria-label={label}
+      autoComplete="off"
+    />
     <datalist id={listId}>{options.map((option) => <option value={option} key={option} />)}</datalist>
-    {!disabled && <small>Escribe o selecciona una opción</small>}
+    {!disabled && (rejected
+      ? <small className="choice-rejected" role="alert">«{rejected}» no está en la lista de este análisis. Elige una de las opciones.</small>
+      : <small>Escribe o selecciona una opción</small>)}
   </span>;
 }
 
 function hasInvalidChoice(analysis: { qualitativeOptions?: string[] }, value: string) {
   return Boolean(analysis.qualitativeOptions?.length)
     && !analysis.qualitativeOptions!.includes(value.trim());
-}
-
-function sanitizeResultInput(type: "numeric" | "qualitative" | "text", rawValue: string) {
-  if (type === "numeric") {
-    const normalized = rawValue.replace(",", ".").replace(/[^0-9.-]/g, "");
-    const negative = normalized.startsWith("-");
-    const unsigned = normalized.replace(/-/g, "");
-    const [whole, ...decimals] = unsigned.split(".");
-    return `${negative ? "-" : ""}${whole}${decimals.length ? `.${decimals.join("")}` : ""}`;
-  }
-  if (type === "text") return rawValue;
-  return rawValue;
 }
 
 function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt, cancel, notify, onCreated }: { patients: LabData["patients"]; analyses: LabData["analyses"]; analysts: LabData["analysts"]; initialOccurredAt: string; cancel: () => void; notify: (message: string) => void; onCreated: (id: string) => void }) {
@@ -369,7 +440,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
   }, [offlineRepository, patientQuery]);
 
   function changeAnalysisResult(analysis: AnalysisDefinition, rawValue: string) {
-    const sanitized = sanitizeResultInput(analysis.resultType, rawValue);
+    const sanitized = sanitizeResultInput(analysis.resultType, rawValue, analysis.decimals);
     setResultValues((current) => {
       const next = { ...current, [analysis.versionId]: sanitized };
       const linked = analysis.resultType === "numeric"
@@ -473,11 +544,38 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
       }
       setPatientReady(true);
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : "No se pudo guardar el paciente.";
-      setPatientError(rpcMessage(message));
+      setPatientError(rpcMessage(errorText(reason, "No se pudo guardar el paciente.")));
     } finally {
       setPatientSaving(false);
     }
+  }
+
+  /**
+   * La base rechaza la tanda entera y solo dice *qué* regla se rompió, nunca en
+   * cuál análisis. Con el catálogo ya en memoria se puede señalar la fila
+   * culpable, que es la diferencia entre «no se pudo guardar» y saber qué tocar.
+   */
+  function registrationError(reason: unknown) {
+    const raw = errorText(reason, "No se pudo guardar el registro.");
+    const base = rpcMessage(raw);
+    const names = (list: AnalysisDefinition[]) => list.map((analysis) => analysis.name).join(", ");
+
+    if (raw.includes("invalid_or_inactive_analysis_version")) {
+      // Mismo criterio que la base: sin versión aprobada (`versionId` vacío) o
+      // con el análisis desactivado en el Catálogo.
+      const blocked = completedAnalyses.filter((analysis) => !analysis.versionId || !analysis.active);
+      if (blocked.length) return `${base} Revisa en el Catálogo: ${names(blocked)}.`;
+    }
+    if (raw.includes("qualitative_option_not_allowed")) {
+      const invalid = completedAnalyses.filter((analysis) =>
+        hasInvalidChoice(analysis, resultValues[analysis.versionId] ?? ""));
+      if (invalid.length) return `${base} Corrige: ${names(invalid)}.`;
+    }
+    if (raw.includes("numeric_value_required") || raw.includes("numeric_precision_exceeded")) {
+      const numeric = completedAnalyses.filter((analysis) => analysis.resultType === "numeric");
+      if (numeric.length) return `${base} Análisis numéricos de esta tanda: ${names(numeric)}.`;
+    }
+    return base;
   }
 
   async function submit(event: React.FormEvent) {
@@ -533,7 +631,7 @@ function NewAnalysisWorkspace({ patients, analyses, analysts, initialOccurredAt,
       notify(offlineRepository?.enabled ? "Análisis guardados en este equipo. Se enviarán cuando haya internet." : "Análisis y resultados guardados en la orden diaria.");
       if (!offlineRepository) router.refresh();
     } catch (reason) {
-      setError(rpcMessage(reason instanceof Error ? reason.message : "No se pudo guardar la orden."));
+      setError(registrationError(reason));
     } finally {
       setSaving(false);
     }
@@ -821,7 +919,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
         return saved.lockVersion;
       } catch (reason) {
         setSaving(false);
-        notify(rpcMessage(reason instanceof Error ? reason.message : "save_failed"));
+        notify(rpcMessage(errorText(reason, "save_failed")));
         return null;
       }
     }
@@ -840,7 +938,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
     });
     if (response.error) {
       setSaving(false);
-      notify(rpcMessage(response.error.message));
+      notify(rpcMessage(errorText(response.error, "catalog_save_failed")));
       return null;
     }
     const saved = response.data as {
@@ -1041,7 +1139,7 @@ function AddPatientDialog({ close, notify }: { close: () => void; notify: (messa
       close();
       if (!offlineRepository) router.refresh();
     } catch (reason) {
-      setError(rpcMessage(reason instanceof Error ? reason.message : "patient_save_failed"));
+      setError(rpcMessage(errorText(reason, "patient_save_failed")));
     } finally {
       setSaving(false);
     }
@@ -1218,7 +1316,7 @@ function EditPatientDialog({ patient, close, notify }: { patient: LabData["patie
       close();
       if (!offlineRepository) router.refresh();
     } catch (reason) {
-      setError(rpcMessage(reason instanceof Error ? reason.message : "patient_update_failed"));
+      setError(rpcMessage(errorText(reason, "patient_update_failed")));
     } finally {
       setSaving(false);
     }
