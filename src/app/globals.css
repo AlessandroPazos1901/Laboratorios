@@ -202,6 +202,8 @@ td > svg { width: 16px; color: #878f96; }
 .result-group { overflow: hidden; background: white; }
 .result-group-head { display: flex; padding: 12px 14px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: #f4f7f9; }
 .result-group-head > div { display: grid; gap: 2px; }.result-group-head > div > span { color: var(--brown); font-size: .64rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }.result-group-head h3 { display: flex; margin: 0; align-items: center; font-size: .95rem; }.result-group-head h3 .result-group-emoji { margin-right: 8px; font-size: 1.18rem; }.result-group-head small { color: var(--muted); font-size: .72rem; }
+.result-group-head > .result-print-actions { display: flex; align-items: center; gap: 10px; }
+.report-page-size { display: flex; align-items: center; gap: 6px; }.report-page-size > span { color: var(--brown); font-size: .64rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }.report-page-size select { min-height: 34px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: white; font-size: .82rem; }
 .report-view-picker { display: grid; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
 .report-view-picker > span { color: var(--teal); font-size: .64rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .report-view-picker > div { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -530,7 +532,7 @@ td > svg { width: 16px; color: #878f96; }
   .metrics-grid,.settings-grid { grid-template-columns: 1fr; }.metric { min-height: 105px; }
   .preview-result dl { grid-template-columns: repeat(2,1fr); }
   .patient-summary { align-items: stretch; flex-direction: column; }.patient-vitals { justify-content: space-between; }.patient-vitals > div:first-child { padding-left: 0; border-left: 0; }.patient-order-context { padding: 10px 0 0; border-top: 1px solid var(--line); border-left: 0; }
-  .result-toolbar { align-items: start; flex-direction: column; }.result-group-head { align-items: stretch; flex-direction: column; }.result-group-head .button { width: 100%; }.result-card-list { grid-template-columns: 1fr; }.result-card-head { align-items: center; }.result-card-body { grid-template-columns: minmax(120px,1fr) minmax(120px,1fr); }
+  .result-toolbar { align-items: start; flex-direction: column; }.result-group-head { align-items: stretch; flex-direction: column; }.result-group-head .button { width: 100%; }.result-group-head > .result-print-actions { align-items: stretch; flex-direction: column; }.report-page-size select { width: 100%; }.result-card-list { grid-template-columns: 1fr; }.result-card-head { align-items: center; }.result-card-body { grid-template-columns: minmax(120px,1fr) minmax(120px,1fr); }
   .workflow-rail { padding-inline: 10px; }.workflow-rail span { font-size: .6rem; }
   .action-bar > div { width: 100%; flex-direction: column; }.action-bar .button { width: 100%; }.catalog-summary { overflow-x: auto; }
   .catalog-pagination { align-items: stretch; flex-direction: column; }.catalog-pagination > div { display: grid; grid-template-columns: 1fr auto 1fr; }.settings-form-card form > .button { width: 100%; }

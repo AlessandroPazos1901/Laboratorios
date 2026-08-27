@@ -178,9 +178,6 @@ export function OfflineAppBootstrap() {
   const refreshOnlineData = useCallback(async () => {
     const active = sessionRef.current;
     const remote = await fetchBundle(active?.meta.cursor ?? 0);
-    if (active?.snapshot.data.patients.length && !remote.data.patients.length) {
-      throw new Error("La descarga no contiene pacientes; se conservó la copia local anterior.");
-    }
     const updated = await applyRemoteSnapshot(active, remote);
     if (updated) await refreshCounters(updated);
   }, [applyRemoteSnapshot, fetchBundle, refreshCounters]);
@@ -249,9 +246,6 @@ export function OfflineAppBootstrap() {
         if (!resolved) break;
       }
       const remote = await fetchBundle(working.meta.cursor);
-      if (working.snapshot.data.patients.length && !remote.data.patients.length) {
-        throw new Error("La descarga no contiene pacientes; se conservó la copia local anterior.");
-      }
       const savedConflicts = await listOfflineConflicts(working);
       const duplicateConflicts = savedConflicts.filter((conflict) =>
         resultConflictAlreadyApplied(conflict, remote.data));
@@ -271,9 +265,12 @@ export function OfflineAppBootstrap() {
       }
       const reachable = await probeServerConnectivity();
       setOnline(reachable);
+      // Con el servidor accesible, callar el motivo real deja al usuario creyendo
+      // que solo faltan cambios por subir mientras la descarga lleva días fallando.
+      const detail = reason instanceof Error ? reason.message : "";
       setMessage(!reachable
         ? "Sin internet. Los cambios permanecen guardados en este equipo."
-        : "Algunos cambios aún no se guardaron. Se reintentará automáticamente.");
+        : `No se pudo sincronizar con el servidor${detail ? ` (${detail})` : ""}. Se reintentará automáticamente.`);
       const queued = await listOfflineOperations(working, ["syncing"]);
       await Promise.all(queued.map(({ operation }) => setOfflineOperationStatus(working, operation.clientMutationId, "pending")));
       const remaining = await refreshCounters(working);

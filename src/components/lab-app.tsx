@@ -6,7 +6,7 @@ import {
   GripVertical, Import, KeyRound, LogOut, Menu, Microscope, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Search,
   Settings, ShieldCheck, SlidersHorizontal, TestTube2, Trash2, UserRound, Users, X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { buildPickerGroups } from "@/lib/catalog-presets";
 import { analysisBelongsToCatalogGroup, buildCatalogGroupOptions, catalogSubsectionDeleteRequest, catalogSubsectionRenameRequest } from "@/lib/catalog-groups";
@@ -25,8 +25,17 @@ import { useOfflineRepository, type OfflineRepository } from "@/lib/offline/repo
 import { probeServerConnectivity } from "@/lib/offline/connectivity";
 import { forgetVaultKey } from "@/lib/offline/session-key";
 import { printedTitleFor, reportViewsForGroup, resultsInView, type ReportView } from "@/lib/report-views";
+import { DEFAULT_REPORT_PAGE_SIZE, isReportPageSize, type ReportPageSize } from "@/lib/report-pdf";
 import type { CatalogOperation } from "@/lib/catalog-operations";
 import type { AnalysisDefinition, CatalogGroup, CatalogSubsection, LabData, LabOrder, ResultValue } from "@/lib/types";
+
+const PAGE_SIZE_KEY = "lims-jose:report-page-size";
+const PAGE_SIZE_LABELS: Record<ReportPageSize, string> = { a5: "A5", carta: "Carta", a4: "A4" };
+// Solo se lee al montar; nadie más cambia esta clave, así que no hay a qué suscribirse.
+const subscribeNothing = () => () => {};
+const readStoredPageSize = () => {
+  try { return localStorage.getItem(PAGE_SIZE_KEY) ?? ""; } catch { return ""; }
+};
 
 type View = "trabajo" | "pacientes" | "analitica" | "catalogo" | "configuracion";
 const nav: { id: View; label: string; icon: typeof Activity }[] = [
@@ -659,6 +668,14 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
   const [draft, setDraft] = useState(order.results);
   const [saving, setSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
+  // El papel depende de la impresora de cada computadora, no del laboratorio:
+  // se recuerda por equipo y no viaja en la sincronización. Se lee con
+  // `useSyncExternalStore` porque el servidor no tiene `localStorage`: así el
+  // primer render coincide en las dos partes y no rompe la hidratación.
+  const storedPageSize = useSyncExternalStore(subscribeNothing, readStoredPageSize, () => "");
+  const [chosenPageSize, setChosenPageSize] = useState<ReportPageSize | null>(null);
+  const pageSize = chosenPageSize
+    ?? (isReportPageSize(storedPageSize) ? storedPageSize : DEFAULT_REPORT_PAGE_SIZE);
   const [editingResultId, setEditingResultId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const resultBatches = useMemo(() => groupResultsByBatch(draft, order.createdAt), [draft, order.createdAt]);
@@ -891,6 +908,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
           activeBatch.batchId,
           includedResultIds,
           title,
+          pageSize,
         );
         if (!blob) throw new Error("offline_report_unavailable");
         report = blob;
@@ -904,6 +922,7 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
             ...(legacyBatch ? { group: activeBatch.group } : { batchId: activeBatch.batchId }),
             resultIds: includedResultIds,
             title,
+            pageSize,
           }),
         });
         if (!reportResponse.ok) {
@@ -950,7 +969,12 @@ function ResultWorkspace({ order, analyses, updateOrder, notify }: { order: LabO
         <span><strong><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(item.group)}</span>{item.group}</strong><small>{fmtDate(item.registeredAt)}</small></span><b>{item.results.length}</b>
       </button>)}</nav>
       {activeBatch && <div className="result-groups"><section className="result-group" aria-labelledby="active-result-group">
-        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><button className="button secondary" onClick={() => void printReport([...printResultIds], printedTitleFor(activeView))} disabled={saving || printing || !printResultIds.size} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : `Imprimir seleccionados (${printResultIds.size})`}</button></div>
+        <div className="result-group-head"><div><span>Tanda registrada · {fmtDate(activeBatch.registeredAt)}</span><h3 id="active-result-group"><span className="result-group-emoji" aria-hidden="true">{resultGroupEmoji(activeBatch.group)}</span>{activeBatch.group}</h3></div><div className="result-print-actions"><label className="report-page-size"><span>Hoja</span><select value={pageSize} onChange={(event) => {
+          const next = event.target.value;
+          if (!isReportPageSize(next)) return;
+          setChosenPageSize(next);
+          try { localStorage.setItem(PAGE_SIZE_KEY, next); } catch { /* no se recuerda, se elige de nuevo */ }
+        }} title="Tamaño de hoja de la impresora de este equipo">{(Object.keys(PAGE_SIZE_LABELS) as ReportPageSize[]).map((size) => <option key={size} value={size}>{PAGE_SIZE_LABELS[size]}</option>)}</select></label><button className="button secondary" onClick={() => void printReport([...printResultIds], printedTitleFor(activeView))} disabled={saving || printing || !printResultIds.size} aria-busy={printing}>{printing ? <><span className="button-spinner" aria-hidden="true" />Generando informe…</> : `Imprimir seleccionados (${printResultIds.size})`}</button></div></div>
         {batchViews.length > 0 && <div className="report-view-picker">
           <span>Informe a imprimir</span>
           <div role="group" aria-label="Vista del informe">

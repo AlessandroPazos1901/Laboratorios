@@ -8,28 +8,97 @@ import {
   buildResultPresentationRows, formatDisplayReference, formatDisplayUnit, type ResultPresentationRow,
 } from "@/lib/result-presentation";
 
-const LETTER: [number, number] = [612, 792];
-const MARGIN = 42;
-const CONTENT_WIDTH = LETTER[0] - MARGIN * 2;
+/**
+ * Tamaños de hoja en puntos. El PDF se emite en el tamaño real del papel: si se
+ * emitiera siempre en Carta, el visor encogería la hoja para que cupiera en A5
+ * (al 68%) y el cuerpo de 8.5pt terminaría en 5.8pt, ilegible.
+ */
+export const REPORT_PAGE_SIZES = {
+  a5: [419.53, 595.28],
+  carta: [612, 792],
+  a4: [595.28, 841.89],
+} as const;
+export type ReportPageSize = keyof typeof REPORT_PAGE_SIZES;
+export const DEFAULT_REPORT_PAGE_SIZE: ReportPageSize = "carta";
+
+export function isReportPageSize(value: unknown): value is ReportPageSize {
+  return typeof value === "string" && value in REPORT_PAGE_SIZES;
+}
+
 const INK = rgb(0.08, 0.16, 0.25);
 const MUTED = rgb(0.37, 0.43, 0.48);
 const CRITICAL = rgb(0.70, 0.14, 0.17);
 const TABLE_HEADER = rgb(0.84, 0.84, 0.84);
 const GROUP_HEADER = rgb(0.90, 0.95, 0.95);
 const SECTION_HEADER = rgb(0.94, 0.96, 0.96);
-const TABLE_COLUMNS = [MARGIN, MARGIN + 230, MARGIN + 340, MARGIN + 415, MARGIN + CONTENT_WIDTH] as const;
 // Métrica compacta: un informe corriente debe caber en una sola hoja Carta.
+// Los tamaños de letra NO dependen de la hoja: un punto es un punto en cualquier
+// papel. Lo que se adapta es la geometría (márgenes, columnas, membrete).
 const ROW_LINE = 9;
 const ROW_MIN = 16;
 const TITLE_HEIGHT = 18;
 const COLUMN_HEIGHT = 15;
 const HEADER_HEIGHT = TITLE_HEIGHT + COLUMN_HEIGHT;
-const CARD_HEIGHT = 52;
-const CARD_GAP = 10;
 const LOGO_MAX_HEIGHT = 64;
 const LOGO_GAP = 24;
-const PAGE_BOTTOM = 40;
 const GROUP_GAP = 8;
+/** Pie de página. Legible para el paciente, no solo para el laboratorio. */
+const FOOTER_SIZE = 8.5;
+
+/** Anchos de columna como fracción del área útil, tomados del diseño en Carta. */
+const COLUMN_FRACTIONS = [0, 230 / 528, 340 / 528, 415 / 528, 1] as const;
+
+/**
+ * Aire vertical del encabezado y del pie. En A5 cada punto que se recorta aquí
+ * es una fila más que cabe en la hoja, y una hoja de más es un informe partido
+ * en dos. En Carta y A4 sobra sitio, así que conservan las medidas de siempre.
+ */
+const VERTICAL_DEFAULTS = { topMargin: 0, logoGap: 6, cardHeight: 52, cardGap: 10, bottomReserve: 40 };
+const VERTICAL_OVERRIDES: Partial<Record<ReportPageSize, Partial<typeof VERTICAL_DEFAULTS>>> = {
+  a5: { topMargin: 14, logoGap: 3, cardHeight: 47, cardGap: 6, bottomReserve: 32 },
+};
+
+export type ReportGeometry = {
+  width: number;
+  height: number;
+  margin: number;
+  topMargin: number;
+  contentWidth: number;
+  columns: readonly number[];
+  logoMaxHeight: number;
+  logoGap: number;
+  cardHeight: number;
+  cardGap: number;
+  bottomReserve: number;
+  footerBaseline: number;
+};
+
+export function reportGeometry(size: ReportPageSize = DEFAULT_REPORT_PAGE_SIZE): ReportGeometry {
+  const [width, height] = REPORT_PAGE_SIZES[size];
+  // Margen proporcional al ancho, con piso de 28pt (~1 cm) porque casi ninguna
+  // impresora doméstica imprime más cerca del borde.
+  const margin = Math.max(28, (width * 42) / 612);
+  const contentWidth = width - margin * 2;
+  const vertical = { ...VERTICAL_DEFAULTS, ...VERTICAL_OVERRIDES[size] };
+  return {
+    width,
+    height,
+    margin,
+    topMargin: vertical.topMargin || margin,
+    contentWidth,
+    columns: COLUMN_FRACTIONS.map((fraction) => margin + fraction * contentWidth),
+    logoMaxHeight: Math.min(LOGO_MAX_HEIGHT, (width * LOGO_MAX_HEIGHT) / 612),
+    logoGap: vertical.logoGap,
+    cardHeight: vertical.cardHeight,
+    cardGap: vertical.cardGap,
+    bottomReserve: vertical.bottomReserve,
+    // El pie manda sobre la reserva inferior: si crece la letra, la última fila
+    // de la tabla se aparta sola en vez de quedar pisada.
+    footerBaseline: vertical.bottomReserve - FOOTER_SIZE - 1,
+  };
+}
+
+const CARTA = reportGeometry("carta");
 
 export type LabReportResult = {
   group: string;
@@ -157,49 +226,67 @@ function drawRoundedBorder(page: PDFPage, x: number, y: number, width: number, h
   );
 }
 
-function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, bold: PDFFont, top: number) {
-  drawRoundedBorder(page, MARGIN, top - CARD_HEIGHT, CONTENT_WIDTH, CARD_HEIGHT, 8);
+/** Recorta al ancho disponible midiendo, no contando caracteres. */
+function fitText(text: string, font: PDFFont, size: number, maxWidth: number) {
+  const value = clean(text);
+  if (font.widthOfTextAtSize(value, size) <= maxWidth) return value;
+  let cut = value;
+  while (cut.length > 1 && font.widthOfTextAtSize(`${cut}…`, size) > maxWidth) cut = cut.slice(0, -1);
+  return `${cut}…`;
+}
+
+function drawPatientCard(page: PDFPage, data: LabReportData, regular: PDFFont, bold: PDFFont, top: number, geo: ReportGeometry) {
+  drawRoundedBorder(page, geo.margin, top - geo.cardHeight, geo.contentWidth, geo.cardHeight, 8);
 
   const rows = [
     ["ORDEN", data.orderCode ?? `ECOLAB-${data.orderNumber}`, "FECHA", new Date(data.orderedAt).toLocaleDateString("es-PE")],
     ["PACIENTE", data.patientName, "SEXO", data.sex],
     ["DNI", data.documentNumber, "EDAD", data.age],
   ];
+  // Las dos columnas de la tarjeta se reparten el área útil: en A5 la posición
+  // fija de la derecha (MARGIN + 365) caía fuera de la hoja.
+  const leftLabel = geo.margin + geo.contentWidth * (18 / 528);
+  const leftValue = geo.margin + geo.contentWidth * (90 / 528);
+  const rightLabel = geo.margin + geo.contentWidth * (365 / 528);
+  const rightValue = geo.margin + geo.contentWidth * (419 / 528);
   rows.forEach((row, index) => {
     const y = top - 14 - index * 15;
-    page.drawText(row[0], { x: MARGIN + 18, y, size: 8.5, font: bold, color: INK });
-    page.drawText(":", { x: MARGIN + 78, y, size: 8.5, font: bold, color: INK });
-    page.drawText(clean(row[1]).slice(0, 44), { x: MARGIN + 90, y, size: 8.5, font: regular, color: INK, maxWidth: 260 });
-    page.drawText(row[2], { x: MARGIN + 365, y, size: 8.5, font: bold, color: INK });
-    page.drawText(":", { x: MARGIN + 407, y, size: 8.5, font: bold, color: INK });
-    page.drawText(clean(row[3]).slice(0, 20), { x: MARGIN + 419, y, size: 8.5, font: regular, color: INK, maxWidth: 90 });
+    page.drawText(row[0], { x: leftLabel, y, size: 8.5, font: bold, color: INK });
+    page.drawText(":", { x: leftValue - 12, y, size: 8.5, font: bold, color: INK });
+    page.drawText(fitText(row[1], regular, 8.5, rightLabel - leftValue - 8), { x: leftValue, y, size: 8.5, font: regular, color: INK });
+    page.drawText(row[2], { x: rightLabel, y, size: 8.5, font: bold, color: INK });
+    page.drawText(":", { x: rightValue - 12, y, size: 8.5, font: bold, color: INK });
+    page.drawText(fitText(row[3], regular, 8.5, geo.margin + geo.contentWidth - rightValue - 8), { x: rightValue, y, size: 8.5, font: regular, color: INK });
   });
 }
 
-function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: number, continuation = false) {
+function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: number, geo: ReportGeometry, continuation = false) {
   const bottom = top - HEADER_HEIGHT;
-  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: COLUMN_HEIGHT, color: TABLE_HEADER });
-  page.drawRectangle({ x: MARGIN, y: top - TITLE_HEIGHT, width: CONTENT_WIDTH, height: TITLE_HEIGHT, color: GROUP_HEADER });
-  page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height: HEADER_HEIGHT, borderColor: INK, borderWidth: 0.8 });
-  page.drawLine({ start: { x: MARGIN, y: top - TITLE_HEIGHT }, end: { x: MARGIN + CONTENT_WIDTH, y: top - TITLE_HEIGHT }, thickness: 0.8, color: INK });
-  TABLE_COLUMNS.slice(1, -1).forEach((x) => page.drawLine({
+  page.drawRectangle({ x: geo.margin, y: bottom, width: geo.contentWidth, height: COLUMN_HEIGHT, color: TABLE_HEADER });
+  page.drawRectangle({ x: geo.margin, y: top - TITLE_HEIGHT, width: geo.contentWidth, height: TITLE_HEIGHT, color: GROUP_HEADER });
+  page.drawRectangle({ x: geo.margin, y: bottom, width: geo.contentWidth, height: HEADER_HEIGHT, borderColor: INK, borderWidth: 0.8 });
+  page.drawLine({ start: { x: geo.margin, y: top - TITLE_HEIGHT }, end: { x: geo.margin + geo.contentWidth, y: top - TITLE_HEIGHT }, thickness: 0.8, color: INK });
+  geo.columns.slice(1, -1).forEach((x) => page.drawLine({
     start: { x, y: bottom }, end: { x, y: top - TITLE_HEIGHT }, thickness: 0.8, color: INK,
   }));
 
   const title = clean(`${reportGroupTitle(group)}${continuation ? " - CONTINUACION" : ""}`).toUpperCase();
   page.drawText(title, {
-    x: MARGIN + (CONTENT_WIDTH - bold.widthOfTextAtSize(title, 9.5)) / 2,
+    x: geo.margin + (geo.contentWidth - bold.widthOfTextAtSize(title, 9.5)) / 2,
     y: top - 13,
     size: 9.5,
     font: bold,
     color: INK,
   });
+  // En A5 «EXAMENES SOLICITADOS» a 8pt ya no cabe en su columna: se recorta al
+  // ancho real en vez de desbordar sobre la columna vecina.
   const headers = ["EXAMENES SOLICITADOS", "RESULTADOS", "UNIDAD", "V. NORMALES"];
   headers.forEach((label, index) => {
-    const left = TABLE_COLUMNS[index];
-    const width = TABLE_COLUMNS[index + 1] - left;
-    page.drawText(clean(label), {
-      x: left + (width - bold.widthOfTextAtSize(clean(label), 8)) / 2,
+    const left = geo.columns[index];
+    const width = geo.columns[index + 1] - left;
+    const text = fitText(label, bold, 8, width - 4);
+    page.drawText(text, {
+      x: left + (width - bold.widthOfTextAtSize(text, 8)) / 2,
       y: bottom + 5,
       size: 8,
       font: bold,
@@ -209,48 +296,48 @@ function drawTableHeader(page: PDFPage, bold: PDFFont, group: string, top: numbe
   return bottom;
 }
 
-function resultRowLines(row: Extract<LabReportTableRow, { kind: "result" }>, regular: PDFFont, bold: PDFFont, analysisX: number) {
+function resultRowLines(row: Extract<LabReportTableRow, { kind: "result" }>, regular: PDFFont, bold: PDFFont, analysisX: number, geo: ReportGeometry) {
   return {
-    analysis: splitText(row.result.analysis, regular, 8.5, TABLE_COLUMNS[1] - analysisX - 5),
-    result: splitText(formatNumericResult(row.result.value, row.result.unit) || "-", bold, 8.5, TABLE_COLUMNS[2] - TABLE_COLUMNS[1] - 8),
-    unit: splitText(formatReportUnit(row.result.unit), regular, 8, TABLE_COLUMNS[3] - TABLE_COLUMNS[2] - 8),
-    reference: splitText(formatReportReference(row.result.reference, row.result.unit), regular, 8, TABLE_COLUMNS[4] - TABLE_COLUMNS[3] - 8),
+    analysis: splitText(row.result.analysis, regular, 8.5, geo.columns[1] - analysisX - 5),
+    result: splitText(formatNumericResult(row.result.value, row.result.unit) || "-", bold, 8.5, geo.columns[2] - geo.columns[1] - 8),
+    unit: splitText(formatReportUnit(row.result.unit), regular, 8, geo.columns[3] - geo.columns[2] - 8),
+    reference: splitText(formatReportReference(row.result.reference, row.result.unit), regular, 8, geo.columns[4] - geo.columns[3] - 8),
   };
 }
 
-function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont) {
+function measureTableRow(row: LabReportTableRow, regular: PDFFont, bold: PDFFont, geo: ReportGeometry) {
   if (row.kind === "title") {
-    const lines = splitText(row.label, bold, 9, CONTENT_WIDTH - 12);
+    const lines = splitText(row.label, bold, 9, geo.contentWidth - 12);
     return Math.max(ROW_MIN + 1, lines.length * ROW_LINE + 7);
   }
   if (row.kind === "section") {
-    const lines = splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12);
+    const lines = splitText(row.label, bold, 8.5, geo.contentWidth - 12);
     return Math.max(ROW_MIN, lines.length * ROW_LINE + 6);
   }
-  const lines = resultRowLines(row, regular, bold, MARGIN + 5 + row.indent * 13);
+  const lines = resultRowLines(row, regular, bold, geo.margin + 5 + row.indent * 13, geo);
   const tallest = Math.max(lines.analysis.length, lines.result.length, lines.unit.length, lines.reference.length);
   return Math.max(ROW_MIN, tallest * ROW_LINE + 6);
 }
 
-function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height: number, regular: PDFFont, bold: PDFFont) {
+function drawTableRow(page: PDFPage, row: LabReportTableRow, top: number, height: number, regular: PDFFont, bold: PDFFont, geo: ReportGeometry) {
   const bottom = top - height;
   if (row.kind === "title") {
-    drawLines(page, splitText(row.label, bold, 9, CONTENT_WIDTH - 12), MARGIN + 6, top - 11, bold, 9, INK, ROW_LINE);
+    drawLines(page, splitText(row.label, bold, 9, geo.contentWidth - 12), geo.margin + 6, top - 11, bold, 9, INK, ROW_LINE);
     return bottom;
   }
   if (row.kind === "section") {
-    page.drawRectangle({ x: MARGIN, y: bottom, width: CONTENT_WIDTH, height, color: SECTION_HEADER });
-    drawLines(page, splitText(row.label, bold, 8.5, CONTENT_WIDTH - 12), MARGIN + 6, top - 11, bold, 8.5, INK, ROW_LINE);
+    page.drawRectangle({ x: geo.margin, y: bottom, width: geo.contentWidth, height, color: SECTION_HEADER });
+    drawLines(page, splitText(row.label, bold, 8.5, geo.contentWidth - 12), geo.margin + 6, top - 11, bold, 8.5, INK, ROW_LINE);
     return bottom;
   }
 
   const baseline = top - 11;
-  const analysisX = MARGIN + 5 + row.indent * 13;
-  const lines = resultRowLines(row, regular, bold, analysisX);
+  const analysisX = geo.margin + 5 + row.indent * 13;
+  const lines = resultRowLines(row, regular, bold, analysisX, geo);
   drawLines(page, lines.analysis, analysisX, baseline, regular, 8.5, INK, ROW_LINE);
-  drawCenteredLines(page, lines.result, TABLE_COLUMNS[1], TABLE_COLUMNS[2], baseline, bold, 8.5, row.result.flag === "critical" ? CRITICAL : INK, ROW_LINE);
-  drawCenteredLines(page, lines.unit, TABLE_COLUMNS[2], TABLE_COLUMNS[3], baseline, regular, 8, INK, ROW_LINE);
-  drawCenteredLines(page, lines.reference, TABLE_COLUMNS[3], TABLE_COLUMNS[4], baseline, regular, 8, INK, ROW_LINE);
+  drawCenteredLines(page, lines.result, geo.columns[1], geo.columns[2], baseline, bold, 8.5, row.result.flag === "critical" ? CRITICAL : INK, ROW_LINE);
+  drawCenteredLines(page, lines.unit, geo.columns[2], geo.columns[3], baseline, regular, 8, INK, ROW_LINE);
+  drawCenteredLines(page, lines.reference, geo.columns[3], geo.columns[4], baseline, regular, 8, INK, ROW_LINE);
   return bottom;
 }
 
@@ -287,19 +374,25 @@ export type LabReportLogos = { left: Uint8Array; right: Uint8Array };
 export function headerLogoBoxes(
   left: { width: number; height: number },
   right: { width: number; height: number },
+  geo: ReportGeometry = CARTA,
 ) {
   const leftRatio = left.width / left.height;
   const rightRatio = right.width / right.height;
-  const height = Math.min(LOGO_MAX_HEIGHT, (CONTENT_WIDTH - LOGO_GAP) / (leftRatio + rightRatio));
+  const height = Math.min(geo.logoMaxHeight, (geo.contentWidth - LOGO_GAP) / (leftRatio + rightRatio));
   const rightWidth = height * rightRatio;
   return {
     height,
-    left: { x: MARGIN, width: height * leftRatio },
-    right: { x: MARGIN + CONTENT_WIDTH - rightWidth, width: rightWidth },
+    left: { x: geo.margin, width: height * leftRatio },
+    right: { x: geo.margin + geo.contentWidth - rightWidth, width: rightWidth },
   };
 }
 
-export async function buildLabReportPdf(data: LabReportData, logos: LabReportLogos) {
+export async function buildLabReportPdf(
+  data: LabReportData,
+  logos: LabReportLogos,
+  pageSize: ReportPageSize = DEFAULT_REPORT_PAGE_SIZE,
+) {
+  const geo = reportGeometry(pageSize);
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -310,52 +403,52 @@ export async function buildLabReportPdf(data: LabReportData, logos: LabReportLog
     : pdf.embedJpg(bytes);
   const leftLogo = await embedLogo(logos.left);
   const rightLogo = await embedLogo(logos.right);
-  const logoBoxes = headerLogoBoxes(leftLogo, rightLogo);
+  const logoBoxes = headerLogoBoxes(leftLogo, rightLogo, geo);
   const logoHeight = logoBoxes.height;
-  const freshTableTop = 792 - MARGIN - logoHeight - 6 - CARD_HEIGHT - CARD_GAP;
-  const freshBodySpace = freshTableTop - HEADER_HEIGHT - PAGE_BOTTOM;
+  const freshTableTop = geo.height - geo.topMargin - logoHeight - geo.logoGap - geo.cardHeight - geo.cardGap;
+  const freshBodySpace = freshTableTop - HEADER_HEIGHT - geo.bottomReserve;
   let page: PDFPage | undefined;
   let y = 0;
 
   function drawLogos(target: PDFPage) {
-    const top = 792 - MARGIN - logoHeight;
+    const top = geo.height - geo.topMargin - logoHeight;
     target.drawImage(leftLogo, { ...logoBoxes.left, y: top, height: logoHeight });
     target.drawImage(rightLogo, { ...logoBoxes.right, y: top, height: logoHeight });
-    return top - 6;
+    return top - geo.logoGap;
   }
 
   function addPage(group: string, continuation = false) {
-    page = pdf.addPage(LETTER);
+    page = pdf.addPage([geo.width, geo.height]);
     const cardTop = drawLogos(page);
-    drawPatientCard(page, data, regular, bold, cardTop);
-    y = drawTableHeader(page, bold, group, cardTop - CARD_HEIGHT - CARD_GAP, continuation);
+    drawPatientCard(page, data, regular, bold, cardTop, geo);
+    y = drawTableHeader(page, bold, group, cardTop - geo.cardHeight - geo.cardGap, geo, continuation);
   }
 
   for (const [group, results] of groupResults(data.results)) {
     const rows = buildReportTableRows(results, data.title);
-    const firstRowHeight = rows[0] ? measureTableRow(rows[0], regular, bold) : 0;
+    const firstRowHeight = rows[0] ? measureTableRow(rows[0], regular, bold, geo) : 0;
     const firstFollowingRows = rows[0]?.kind === "title"
       ? rows.slice(1, 3)
       : rows[0]?.kind === "section"
         ? rows.slice(1, 2)
         : [];
     const minimumGroupHeight = GROUP_GAP + HEADER_HEIGHT + firstRowHeight
-      + firstFollowingRows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
-    const rowsHeight = rows.reduce((total, row) => total + measureTableRow(row, regular, bold), 0);
+      + firstFollowingRows.reduce((total, row) => total + measureTableRow(row, regular, bold, geo), 0);
+    const rowsHeight = rows.reduce((total, row) => total + measureTableRow(row, regular, bold, geo), 0);
     const requiredHeight = rowsHeight <= freshBodySpace ? GROUP_GAP + HEADER_HEIGHT + rowsHeight : minimumGroupHeight;
-    if (!page || y - requiredHeight < PAGE_BOTTOM) addPage(group);
-    else y = drawTableHeader(page, bold, group, y - GROUP_GAP);
+    if (!page || y - requiredHeight < geo.bottomReserve) addPage(group);
+    else y = drawTableHeader(page, bold, group, y - GROUP_GAP, geo);
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
-      const rowHeight = measureTableRow(row, regular, bold);
+      const rowHeight = measureTableRow(row, regular, bold, geo);
       const followingRows = row.kind === "title"
         ? rows.slice(index + 1, index + 3)
         : row.kind === "section"
           ? rows.slice(index + 1, index + 2)
           : [];
-      const nextHeight = followingRows.reduce((total, followingRow) => total + measureTableRow(followingRow, regular, bold), 0);
-      if (y - rowHeight - nextHeight < PAGE_BOTTOM) addPage(group, true);
-      y = drawTableRow(page!, row, y, rowHeight, regular, bold);
+      const nextHeight = followingRows.reduce((total, followingRow) => total + measureTableRow(followingRow, regular, bold, geo), 0);
+      if (y - rowHeight - nextHeight < geo.bottomReserve) addPage(group, true);
+      y = drawTableRow(page!, row, y, rowHeight, regular, bold, geo);
     }
   }
 
@@ -364,10 +457,18 @@ export async function buildLabReportPdf(data: LabReportData, logos: LabReportLog
   const printed = new Intl.DateTimeFormat("es-PE", {
     dateStyle: "short", timeStyle: "short", timeZone: "America/Lima",
   }).format(new Date(data.printedAt));
+  // Pie proporcional al área útil: en A5 las posiciones fijas (455 / 548) caían
+  // fuera de la hoja y el número de página no se imprimía. En Carta las
+  // fracciones devuelven exactamente los mismos puntos de siempre.
+  const footerX = (carta: number) => geo.margin + geo.contentWidth * ((carta - 42) / 528);
   pdf.getPages().forEach((outputPage, index) => {
-    outputPage.drawText(`Impreso el ${clean(printed)}`, { x: MARGIN, y: 31, size: 7, font: regular, color: MUTED, maxWidth: 300 });
-    outputPage.drawText(`Rev. ${data.revision}`, { x: 455, y: 31, size: 7, font: regular, color: MUTED, maxWidth: 70 });
-    outputPage.drawText(`${index + 1}/${pdf.getPageCount()}`, { x: 548, y: 31, size: 7, font: regular, color: MUTED });
+    outputPage.drawText(`Impreso el ${clean(printed)}`, { x: geo.margin, y: geo.footerBaseline, size: FOOTER_SIZE, font: regular, color: MUTED, maxWidth: geo.contentWidth * (300 / 528) });
+    outputPage.drawText(`Rev. ${data.revision}`, { x: footerX(455), y: geo.footerBaseline, size: FOOTER_SIZE, font: regular, color: MUTED, maxWidth: geo.contentWidth * (70 / 528) });
+    // Un informe de diez hojas o más ensancha esta etiqueta; sin el tope se
+    // saldría por el borde derecho de la A5, que es la hoja más justa.
+    const pageLabel = `${index + 1}/${pdf.getPageCount()}`;
+    const pageRight = geo.margin + geo.contentWidth - regular.widthOfTextAtSize(pageLabel, FOOTER_SIZE);
+    outputPage.drawText(pageLabel, { x: Math.min(footerX(548), pageRight), y: geo.footerBaseline, size: FOOTER_SIZE, font: regular, color: MUTED });
   });
 
   return pdf.save();

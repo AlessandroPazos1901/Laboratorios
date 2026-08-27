@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, type ReactNode } from "react";
-import { buildLabReportPdf } from "@/lib/report-pdf";
+import { buildLabReportPdf, type ReportPageSize } from "@/lib/report-pdf";
 import { birthMoment, formatPatientAgeAt } from "@/lib/clinical";
 import { patientIdFromDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/client";
@@ -64,7 +64,7 @@ export type OfflineRepository = {
   }): Promise<string>;
   saveResults(order: LabOrder, results: ResultValue[]): Promise<{ lockVersion: number; results: ResultValue[] }>;
   saveCatalog(operation: CatalogOperation): Promise<void>;
-  buildOfflineReport(order: LabOrder, batchId: string, includedResultIds: string[], title?: string): Promise<Blob | null>;
+  buildOfflineReport(order: LabOrder, batchId: string, includedResultIds: string[], title?: string, pageSize?: ReportPageSize): Promise<Blob | null>;
   previewPatientRoster(file: File): Promise<PatientRosterPreview>;
   importPatientRoster(input: {
     file: File;
@@ -383,7 +383,7 @@ export function OfflineRepositoryProvider(props: {
       queuedOperation.payload = operation as unknown as Record<string, unknown>;
       await commit(materializeCatalog(props.data, operation), queuedOperation, true);
     },
-    async buildOfflineReport(order, batchId, includedResultIds, title) {
+    async buildOfflineReport(order, batchId, includedResultIds, title, pageSize) {
       if (!props.session) return null;
       const included = new Set(includedResultIds);
       const results = order.results.filter((result) => result.batchId === batchId && included.has(result.orderAnalysisId));
@@ -405,7 +405,7 @@ export function OfflineRepositoryProvider(props: {
         printedAt: new Date().toISOString(),
         title,
         results: offlineReportResults(results, props.data.analyses, props.data.catalogGroups ?? []),
-      }, { left: leftLogo, right: rightLogo });
+      }, { left: leftLogo, right: rightLogo }, pageSize);
       return new Blob([bytes as BlobPart], { type: "application/pdf" });
     },
     async previewPatientRoster(file) {

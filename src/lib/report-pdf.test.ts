@@ -4,7 +4,8 @@ import { PDFDocument } from "pdf-lib";
 import { describe, expect, it } from "vitest";
 import {
   buildLabReportPdf, buildReportTableRows, formatReportReference, formatReportUnit, headerLogoBoxes,
-  type LabReportResult,
+  REPORT_PAGE_SIZES, reportGeometry,
+  type LabReportResult, type ReportPageSize,
 } from "./report-pdf";
 import { formatNumericResult } from "./clinical";
 import { entryFullFigure, resultEntryValue, resultStorageValue } from "./result-presentation";
@@ -54,6 +55,66 @@ describe("membrete a dos piezas", () => {
     expect(cajas.height).toBeLessThan(64);
     expect(cajas.left.width + cajas.right.width).toBeLessThanOrEqual(528);
     expect(cajas.right.x).toBeGreaterThan(cajas.left.x + cajas.left.width);
+  });
+});
+
+const labLogos = async () => ({
+  left: await readFile(path.join(process.cwd(), "public", "membrete-izquierda.png")),
+  right: await readFile(path.join(process.cwd(), "public", "membrete-derecha.png")),
+});
+
+describe("tamaño de hoja", () => {
+  const sizes: ReportPageSize[] = ["a5", "carta", "a4"];
+
+  it("mantiene toda la geometría dentro de la hoja", () => {
+    for (const size of sizes) {
+      const geo = reportGeometry(size);
+      expect(geo.margin).toBeGreaterThanOrEqual(28);
+      expect(geo.columns[0]).toBe(geo.margin);
+      expect(geo.columns.at(-1)).toBeCloseTo(geo.width - geo.margin, 5);
+      // Columnas estrictamente crecientes: si dos se cruzaran, el texto de una
+      // se dibujaría encima de la vecina.
+      geo.columns.forEach((x, index) => index && expect(x).toBeGreaterThan(geo.columns[index - 1]));
+      expect(geo.logoMaxHeight).toBeLessThanOrEqual(64);
+      // El pie tiene que caber entero en la reserva inferior: si la sobrepasara,
+      // la última fila de la tabla quedaría escrita encima.
+      expect(geo.footerBaseline).toBeGreaterThan(8);
+      expect(geo.footerBaseline + 8.5).toBeLessThanOrEqual(geo.bottomReserve);
+      // Arriba solo puede recortarse aire, nunca hasta el borde imprimible.
+      expect(geo.topMargin).toBeGreaterThanOrEqual(14);
+      expect(geo.topMargin).toBeLessThanOrEqual(geo.margin);
+    }
+  });
+
+  it("aprovecha más la hoja en A5 que si copiara las medidas de Carta", () => {
+    const a5 = reportGeometry("a5");
+    const carta = reportGeometry("carta");
+    const bodyOf = (geo: ReturnType<typeof reportGeometry>) =>
+      geo.height - geo.topMargin - geo.logoGap - geo.cardHeight - geo.cardGap - geo.bottomReserve;
+    const comoCarta = a5.height - carta.margin - carta.logoGap - carta.cardHeight - carta.cardGap - carta.bottomReserve;
+    // Al menos dos filas de 16pt ganadas, que es lo que evita la segunda hoja.
+    expect(bodyOf(a5) - comoCarta).toBeGreaterThanOrEqual(32);
+  });
+
+  it("emite el PDF en el tamaño real del papel, sin encoger", async () => {
+    const logo = await labLogos();
+    for (const size of sizes) {
+      const bytes = await buildLabReportPdf({
+        orderNumber: 1,
+        orderedAt: "2026-08-11T16:20:00-05:00",
+        patientName: "Paciente con un nombre bastante largo para la tarjeta",
+        documentNumber: "70421856",
+        sex: "Femenino",
+        age: "34 años",
+        revision: 1,
+        printedAt: "2026-08-11T16:30:00-05:00",
+        results: orderedGroup(10, [reportResult("HEM-RBC", "HEMATIES"), reportResult("HEM-WBC", "LEUCOCITOS")]),
+      }, logo, size);
+      const page = (await PDFDocument.load(bytes)).getPage(0);
+      const [width, height] = REPORT_PAGE_SIZES[size];
+      expect(page.getWidth()).toBeCloseTo(width, 2);
+      expect(page.getHeight()).toBeCloseTo(height, 2);
+    }
   });
 });
 
@@ -298,6 +359,24 @@ describe("buildLabReportPdf", () => {
       const output = path.join(process.cwd(), "tmp", "pdfs");
       await mkdir(output, { recursive: true });
       await writeFile(path.join(output, "informe-laboratorio-estructurado.pdf"), bytes);
+      // Una muestra por tamaño: la revisión de A5 es visual, no automatizable.
+      for (const size of ["a5", "carta", "a4"] as ReportPageSize[]) {
+        await writeFile(
+          path.join(output, `informe-${size}.pdf`),
+          await buildLabReportPdf({
+            orderNumber: 4663,
+            orderCode: "LAB-4663",
+            orderedAt: "2026-08-11T16:20:00-05:00",
+            patientName: "Paciente de prueba",
+            documentNumber: "70421856",
+            sex: "Femenino",
+            age: "34 años",
+            revision: 1,
+            printedAt: "2026-08-11T16:30:00-05:00",
+            results: [...orderedGroup(10, hematology), ...biochemistry, ...immunology, ...urine, ...stool, ...vaginal],
+          }, logo, size),
+        );
+      }
     }
   });
 

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { birthMoment, formatPatientAgeAt } from "@/lib/clinical";
-import { buildLabReportPdf, type LabReportResult } from "@/lib/report-pdf";
+import { buildLabReportPdf, DEFAULT_REPORT_PAGE_SIZE, isReportPageSize, type LabReportResult } from "@/lib/report-pdf";
 import { formatDni } from "@/lib/patients";
 import { createClient } from "@/lib/supabase/server";
 
@@ -21,7 +21,9 @@ function resultText(row: { numeric_value: number | null; qualitative_value: stri
 export async function POST(request: Request, context: { params: Promise<{ orderId: string }> }) {
   const { orderId } = await context.params;
   if (!UUID.test(orderId)) return NextResponse.json({ error: "Identificador inválido." }, { status: 400 });
-  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown; resultIds?: unknown; title?: unknown } | null;
+  const body = await request.json().catch(() => null) as { group?: unknown; batchId?: unknown; resultIds?: unknown; title?: unknown; pageSize?: unknown } | null;
+  // Un tamaño desconocido no es motivo para no imprimir: se cae al de siempre.
+  const pageSize = isReportPageSize(body?.pageSize) ? body.pageSize : DEFAULT_REPORT_PAGE_SIZE;
   const targetGroup = typeof body?.group === "string" ? body.group.trim() : "";
   // Nombre de la vista impresa. Se acota porque va tal cual al PDF.
   const title = typeof body?.title === "string" ? body.title.trim().slice(0, 80) : "";
@@ -142,7 +144,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
     printedAt: new Date().toISOString(),
     title,
     results: printable,
-  }, { left: leftLogo, right: rightLogo });
+  }, { left: leftLogo, right: rightLogo }, pageSize);
   return new NextResponse(Buffer.from(bytes), {
     headers: {
       "Content-Type": "application/pdf",
