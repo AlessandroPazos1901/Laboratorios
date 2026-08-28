@@ -261,12 +261,58 @@ export function matchChoiceOption(options: string[], value: string) {
  * el catálogo aprobó para ese análisis: pasarse era `numeric_precision_exceeded`
  * al guardar, con toda la tanda ya escrita.
  */
-export function sanitizeResultInput(type: "numeric" | "qualitative" | "text", rawValue: string, decimals?: number, analysisCode?: string) {
+export /**
+ * Piso de dígitos enteros en una casilla de escala abreviada (10³ o 10⁶).
+ *
+ * El tope lo manda el límite alto del rango: si va de 4.3 a 10, dos dígitos
+ * bastan y «8456» queda fuera. Pero el rango describe lo NORMAL, no lo posible:
+ * una leucocitosis de leucemia llega a 300 ×10³ y con dos dígitos no se podría
+ * registrar justamente el valor crítico que el laboratorio tiene que informar.
+ * Tres es el punto donde siguen cabiendo esos extremos y el error de teclear la
+ * cifra absoluta (cuatro dígitos o más) se sigue cortando.
+ */
+const MIN_SCALED_ENTRY_DIGITS = 3;
+
+/** La casilla se teclea en una escala abreviada, no en la unidad absoluta. */
+function usesScaledEntry(analysisCode?: string, unit?: string) {
+  return usesThousandsEntry(analysisCode) || isMillonesUnit(unit ?? "");
+}
+
+/**
+ * Dígitos enteros que caben en la casilla, leídos del rango del propio análisis
+ * y en la escala en que se teclea (el rango de plaquetas viaja en /µL, la
+ * casilla en 10³/µL).
+ */
+function scaledEntryDigits(high: number | undefined, analysisCode?: string) {
+  if (typeof high !== "number" || !Number.isFinite(high) || high <= 0) return MIN_SCALED_ENTRY_DIGITS;
+  const entryHigh = usesThousandsEntry(analysisCode) ? high / 1_000 : high;
+  const digits = String(Math.floor(Math.abs(entryHigh))).length;
+  return Math.max(MIN_SCALED_ENTRY_DIGITS, digits);
+}
+
+export type ResultInputLimits = {
+  /** Decimales aprobados para el valor GUARDADO. */
+  decimals?: number;
+  analysisCode?: string;
+  unit?: string;
+  /** Límite alto del rango de referencia, en la unidad en que se guarda. */
+  high?: number;
+};
+
+export function sanitizeResultInput(
+  type: "numeric" | "qualitative" | "text",
+  rawValue: string,
+  limits: ResultInputLimits = {},
+) {
   if (type !== "numeric") return rawValue;
+  const { decimals, analysisCode, unit, high } = limits;
   const normalized = rawValue.replace(",", ".").replace(/[^0-9.-]/g, "");
   const negative = normalized.startsWith("-");
   const unsigned = normalized.replace(/-/g, "");
-  const [whole, ...rest] = unsigned.split(".");
+  const [rawWhole, ...rest] = unsigned.split(".");
+  const whole = usesScaledEntry(analysisCode, unit)
+    ? rawWhole.slice(0, scaledEntryDigits(high, analysisCode))
+    : rawWhole;
   const fraction = rest.join("");
   // `decimals` es del valor GUARDADO. Leucocitos y plaquetas se teclean en miles
   // y se guardan multiplicados por 1000, así que en la casilla caben tres
