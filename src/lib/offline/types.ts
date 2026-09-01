@@ -1,7 +1,10 @@
 import type { LabData } from "@/lib/types";
 
 export const OFFLINE_MODE_ENABLED = process.env.NEXT_PUBLIC_OFFLINE_MODE === "true";
-export const OFFLINE_LEASE_HOURS = 72;
+// La posta puede pasar semanas sin internet: la autorización no caduca en la
+// práctica. Se deja un plazo (no "sin exp") para que el token siga siendo un
+// JWT normal y se pueda acortar de nuevo cambiando solo este número.
+export const OFFLINE_LEASE_HOURS = 10 * 365 * 24;
 
 export type OfflineOperationKind =
   | "patient.upsert"

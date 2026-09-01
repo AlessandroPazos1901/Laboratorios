@@ -304,7 +304,7 @@ export function OfflineAppBootstrap() {
             await adoptVaultRef.current(await resumeOfflineVault(await importDataKey(stashed)));
             return;
           } catch {
-            // Autorización vencida, bóveda cambiada o clave inservible: se sigue
+            // Bóveda cambiada o clave inservible: se sigue
             // por el camino normal y se pedirá la contraseña.
             forgetVaultKey();
             if (!mounted) return;
@@ -456,7 +456,6 @@ export function OfflineAppBootstrap() {
       }
     }
     if (!meta) throw new Error("offline_not_prepared");
-    if (new Date(meta.lease.expiresAt).getTime() <= Date.now()) throw new Error("offline_lease_expired");
     return unlock(password);
   }
 
@@ -613,7 +612,6 @@ const accessError: Record<string, string> = {
   bad_credentials: "Usuario o contraseña incorrectos.",
   offline_password_incorrect: "Contraseña incorrecta.",
   offline_not_prepared: "Este equipo aún no se ha usado con internet. Conéctalo una vez para poder trabajar sin conexión.",
-  offline_lease_expired: "Han pasado más de 72 horas sin conexión. Conecta el equipo una vez para continuar.",
   offline_database_blocked: "Los datos están abiertos en otra ventana. Cierra las demás pestañas de LIMS José.",
 };
 
@@ -672,7 +670,7 @@ function AccessGate(props: {
     intro={props.online
       ? "Ingresa con la cuenta compartida autorizada del laboratorio."
       : props.meta
-        ? `Sin internet, con la misma contraseña de siempre. Puedes trabajar hasta ${new Date(props.meta.lease.expiresAt).toLocaleString("es-PE")}.`
+        ? "Sin internet, con la misma contraseña de siempre. Puedes trabajar todo el tiempo que haga falta; lo registrado se envía solo cuando vuelva el internet."
         : "Sin internet y este equipo todavía no tiene datos guardados. Conéctalo una vez para prepararlo."}
     notice={props.message || undefined}
     error={error}

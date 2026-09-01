@@ -1,5 +1,5 @@
 import { importJWK, jwtVerify, type JWK } from "jose";
-import type { OfflineLeaseClaims } from "@/lib/offline/types";
+import { OFFLINE_LEASE_HOURS, type OfflineLeaseClaims } from "@/lib/offline/types";
 
 const ISSUER = "lims-jose";
 const AUDIENCE = "lims-jose-offline";
@@ -17,7 +17,9 @@ export async function verifyOfflineLease(
     throw new Error("offline_public_key_invalid");
   }
   const key = await importJWK(publicJwk, "ES256");
-  const { payload } = await jwtVerify(token, key, { issuer: ISSUER, audience: AUDIENCE });
+  // clockTolerance de una década: un equipo con el token corto de antes está
+  // justamente sin internet para renovarlo. Se renueva solo al reconectar.
+  const { payload } = await jwtVerify(token, key, { issuer: ISSUER, audience: AUDIENCE, clockTolerance: OFFLINE_LEASE_HOURS * 3600 });
   if (payload.deviceId !== expectedDeviceId) throw new Error("offline_device_mismatch");
   const claims: OfflineLeaseClaims = {
     userId: String(payload.sub ?? ""),

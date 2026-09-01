@@ -215,7 +215,7 @@ export async function createOfflineVault(input: {
   return { meta, key: dataKey, snapshot: input.snapshot } satisfies UnlockedVault;
 }
 
-export async function unlockOfflineVault(password: string, allowExpired = false): Promise<UnlockedVault> {
+export async function unlockOfflineVault(password: string): Promise<UnlockedVault> {
   const meta = await getActiveVaultMeta();
   if (!meta) throw new Error("offline_vault_missing");
   const wrappingKey = await deriveVaultKey(password, meta.salt);
@@ -226,10 +226,10 @@ export async function unlockOfflineVault(password: string, allowExpired = false)
     throw new Error("offline_password_incorrect");
   }
   try {
-    return await openOfflineVault(meta, key, allowExpired);
+    return await openOfflineVault(meta, key);
   } catch (reason) {
     // Que no descifre significa que la contraseña no es la que cerró la bóveda;
-    // el resto de fallos (bóveda ausente, autorización vencida) se dejan pasar.
+    // el resto de fallos (bóveda ausente, clave inservible) se dejan pasar.
     if (reason instanceof Error && reason.message === "offline_snapshot_unreadable") {
       throw new Error("offline_password_incorrect");
     }
@@ -241,18 +241,15 @@ export async function unlockOfflineVault(password: string, allowExpired = false)
  * Reabre la bóveda con la clave de datos ya en mano, sin derivarla de la
  * contraseña. Es lo que permite que recargar la página no eche al usuario.
  */
-export async function resumeOfflineVault(key: CryptoKey, allowExpired = false): Promise<UnlockedVault> {
+export async function resumeOfflineVault(key: CryptoKey): Promise<UnlockedVault> {
   const meta = await getActiveVaultMeta();
   if (!meta) throw new Error("offline_vault_missing");
-  return openOfflineVault(meta, key, allowExpired);
+  return openOfflineVault(meta, key);
 }
 
-async function openOfflineVault(meta: OfflineVaultMeta, key: CryptoKey, allowExpired: boolean): Promise<UnlockedVault> {
+async function openOfflineVault(meta: OfflineVaultMeta, key: CryptoKey): Promise<UnlockedVault> {
   const claims = await verifyOfflineLease(meta.lease.token, meta.deviceId);
   if (claims.userId !== meta.userId) throw new Error("offline_user_mismatch");
-  if (!allowExpired && new Date(meta.lease.expiresAt).getTime() <= Date.now()) {
-    throw new Error("offline_lease_expired");
-  }
   const encrypted = await (await database()).get("records", recordId(meta.id));
   if (!encrypted) throw new Error("offline_snapshot_missing");
   try {
