@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import { flagNumericResult, isMissingBatchSchema, numericLimits, referenceLabel, resultNumericLimits } from "@/lib/clinical";
 import { formatDni } from "@/lib/patients";
 import type { AnalysisDefinition, Analyst, CatalogGroup, CatalogSubsection, LabData, LabOrder, Patient, ResultFlag } from "@/lib/types";
@@ -42,38 +42,64 @@ type SettingsRow = { trade_name: string | null; report_footer: string | null };
 
 const allowedFlags = new Set<Exclude<ResultFlag, "unreviewed">>(["normal", "low", "high", "critical"]);
 
+/**
+ * PostgREST recorta toda respuesta en `max-rows` (1000 en Supabase) y no avisa:
+ * al pasar de mil filas, `result_values` y `order_analyses` llegaban truncados y
+ * el ultimo registro del dia salia con los analisis pero con los valores en
+ * blanco, tanto en la tabla como en lo que se mandaba a imprimir. Cada consulta
+ * sin tope propio se pagina, y lleva `id` como ultimo criterio de orden para que
+ * dos paginas no se solapen ni se salten una fila.
+ */
+const PAGE_SIZE = 1_000;
+
+type PageableQuery<Row> = {
+  range: (from: number, to: number) => PromiseLike<{ data: Row[] | null; error: PostgrestError | null }>;
+};
+
+async function selectAll<Row>(query: () => PageableQuery<Row>) {
+  const rows: Row[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await query().range(from, from + PAGE_SIZE - 1);
+    if (error) return { data: null, error };
+    rows.push(...(data ?? []));
+    if ((data?.length ?? 0) < PAGE_SIZE) return { data: rows, error: null };
+  }
+}
+
 export async function loadLabData(
   supabase: SupabaseClient,
   options: { offlineWindowDays?: number } = {},
 ): Promise<LabData> {
   const patientColumns = "id,full_name,birth_date,birth_time,sex,sync_version";
-  let ordersQuery = supabase
-    .from("orders")
-    .select("id,order_number,patient_id,ordered_at,lock_version")
-    .neq("status", "cancelled")
-    .order("ordered_at", { ascending: false });
-  if (options.offlineWindowDays) {
-    const since = new Date(Date.now() - options.offlineWindowDays * 24 * 60 * 60 * 1000).toISOString();
-    ordersQuery = ordersQuery.gte("ordered_at", since).limit(5_000);
-  } else {
-    ordersQuery = ordersQuery.limit(250);
-  }
+  const ordersSince = options.offlineWindowDays
+    ? new Date(Date.now() - options.offlineWindowDays * 24 * 60 * 60 * 1000).toISOString()
+    : null;
+  const ordersQuery = () => {
+    const query = supabase
+      .from("orders")
+      .select("id,order_number,patient_id,ordered_at,lock_version")
+      .neq("status", "cancelled")
+      .order("ordered_at", { ascending: false })
+      .order("id");
+    return ordersSince ? query.gte("ordered_at", ordersSince) : query;
+  };
   const [
     patientsResult, ordersResult, groupsResult, analysesResult, versionsResult,
     orderAnalysesResult, analysisBatchesResult, revisionsResult, resultsResult, analystsResult, settingsResult, subsectionsResult,
   ] = await Promise.all([
-    supabase.from("patients").select(patientColumns),
-    ordersQuery,
-    supabase.from("analysis_groups").select("id,name,display_order,active").order("display_order"),
-    supabase.from("analyses").select("id,code,group_id,name,result_type,active,source_metadata"),
-    supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,critical_limits,effective_from,effective_to,clinical_status").order("version", { ascending: false }),
-    supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id,batch_id,performed_by,analyst_id,display_order,created_at").order("display_order"),
-    supabase.from("order_analysis_batches").select("id,order_id,group_id,registered_at").order("registered_at", { ascending: false }),
-    supabase.from("result_revisions").select("id,order_id,revision").order("revision", { ascending: false }),
-    supabase.from("result_values").select("id,revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot"),
-    supabase.from("analysts").select("id,full_name,active").order("full_name"),
+    selectAll(() => supabase.from("patients").select(patientColumns).order("id")),
+    // Sin ventana offline basta el tope explicito de 250: cabe en una sola pagina.
+    ordersSince ? selectAll(ordersQuery) : ordersQuery().limit(250),
+    selectAll(() => supabase.from("analysis_groups").select("id,name,display_order,active").order("display_order").order("id")),
+    selectAll(() => supabase.from("analyses").select("id,code,group_id,name,result_type,active,source_metadata").order("id")),
+    selectAll(() => supabase.from("analysis_versions").select("id,analysis_id,version,sample_type,unit,method,decimals,qualitative_options,reference_ranges,critical_limits,effective_from,effective_to,clinical_status").order("version", { ascending: false }).order("id")),
+    selectAll(() => supabase.from("order_analyses").select("id,order_id,analysis_id,analysis_version_id,batch_id,performed_by,analyst_id,display_order,created_at").order("display_order").order("id")),
+    selectAll(() => supabase.from("order_analysis_batches").select("id,order_id,group_id,registered_at").order("registered_at", { ascending: false }).order("id")),
+    selectAll(() => supabase.from("result_revisions").select("id,order_id,revision").order("revision", { ascending: false }).order("id")),
+    selectAll(() => supabase.from("result_values").select("id,revision_id,order_analysis_id,numeric_value,text_value,qualitative_value,flag,clinical_snapshot").order("id")),
+    selectAll(() => supabase.from("analysts").select("id,full_name,active").order("full_name").order("id")),
     supabase.from("lab_settings").select("trade_name,report_footer").eq("id", true).maybeSingle(),
-    supabase.from("analysis_subsections").select("id,group_id,name,display_order").order("display_order"),
+    selectAll(() => supabase.from("analysis_subsections").select("id,group_id,name,display_order").order("display_order").order("id")),
   ]);
 
   // Never turn a failed clinical query into an empty collection. Doing so
@@ -95,7 +121,7 @@ export async function loadLabData(
   if (requiredError) throw requiredError;
 
   const patientRows = (patientsResult.data ?? []) as unknown as PatientRow[];
-  const orderRows = (ordersResult.data ?? []) as OrderRow[];
+  const orderRows = (ordersResult.data ?? []) as unknown as OrderRow[];
   const groupRows = (groupsResult.data ?? []) as GroupRow[];
   const analysisRows = (analysesResult.data ?? []) as AnalysisRow[];
   const versionRows = (versionsResult.data ?? []) as VersionRow[];
@@ -113,27 +139,30 @@ export async function loadLabData(
       || orderAnalysesResult.error.message.includes("performed_by")
       || orderAnalysesResult.error.message.includes("analyst_id");
     if (missingPerformer) {
-      const currentSchemaResult = await supabase
+      const currentSchemaResult = await selectAll(() => supabase
         .from("order_analyses")
         .select("id,order_id,analysis_id,analysis_version_id,batch_id,display_order,created_at")
-        .order("display_order");
+        .order("display_order")
+        .order("id"));
       if (!currentSchemaResult.error) {
         orderAnalysisRows = (currentSchemaResult.data ?? []).map((row) => ({ ...row, performed_by: null, analyst_id: null })) as OrderAnalysisRow[];
       } else if (!isMissingBatchSchema(currentSchemaResult.error)) {
         throw currentSchemaResult.error;
       } else {
-        const legacyResult = await supabase
+        const legacyResult = await selectAll(() => supabase
           .from("order_analyses")
           .select("id,order_id,analysis_id,analysis_version_id,display_order,created_at")
-          .order("display_order");
+          .order("display_order")
+          .order("id"));
         if (legacyResult.error) throw legacyResult.error;
         orderAnalysisRows = (legacyResult.data ?? []).map((row) => ({ ...row, batch_id: null, performed_by: null, analyst_id: null })) as OrderAnalysisRow[];
       }
     } else if (isMissingBatchSchema(orderAnalysesResult.error)) {
-      const legacyResult = await supabase
+      const legacyResult = await selectAll(() => supabase
         .from("order_analyses")
         .select("id,order_id,analysis_id,analysis_version_id,display_order,created_at")
-        .order("display_order");
+        .order("display_order")
+        .order("id"));
       if (legacyResult.error) throw legacyResult.error;
       orderAnalysisRows = (legacyResult.data ?? []).map((row) => ({ ...row, batch_id: null, performed_by: null, analyst_id: null })) as OrderAnalysisRow[];
     } else {
